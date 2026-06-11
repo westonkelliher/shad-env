@@ -1,0 +1,22 @@
+{
+  "name": "shad-env",
+  "description": "An interface for drawing via pre-defined shaders",
+  "details": "Drawing Order:\n- Primarily ordered by z-value with lower z-values drawn first\n- secondarily ordered by index with first-added = first-drawn\n\nState:\n- compiled shaders held in a Map<string,Shader> keyed by <shader-handle>\n\nTODO:\n- probably want a way to specify inputs to shaders?",
+  "spells": {
+    "add-shad": {
+      "name": "add-shad",
+      "usage": "<x1>,<y1>,<x2>,<y2> <shader-handle> <hash> [z-value]",
+      "tags": [],
+      "effect": "binds the shader to the area defined by the given coordinates",
+      "details": "- potentially compiles the shader?\n- z-value is 0 by default\n- z-value is a float but decimal not required in this syntax"
+    },
+    "register-shader": {
+      "name": "register-shader",
+      "usage": "<shader-handle> <path-to-shader-file>",
+      "tags": [],
+      "effect": "compiles the "
+    }
+  },
+  "rituals": {},
+  "tablets": {}
+}
