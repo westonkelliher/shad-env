@@ -1,13 +1,14 @@
 // Heightmap-lit text demo for shad-env.
 //
-//   - glyph SOURCE textures are pre-rendered by gen_glyphs.py (sharp, antialiased
-//     white-on-black PNGs) into ./textures/ ; this program just LOADS them.
-//   - all glyphs are stacked into one texture_2d_array.
-//   - the string is laid out on the CPU (with word-wrap) into per-glyph quads,
-//     uploaded as an INSTANCE buffer.
-//   - one instanced draw renders every glyph; the fragment shader treats each
-//     glyph as a heightmap and lights it with one directional light. Surface
-//     angles come from a directional difference-of-Gaussians of the height.
+// The big picture:
+//   1. gen_glyphs.py pre-renders each unique character as a sharp grayscale
+//      PNG (white glyph on black) into ./textures/. We just load those.
+//   2. All glyph images are stacked into ONE texture_2d_array (one layer per
+//      unique character).
+//   3. The string is laid out on the CPU (with word wrap) into per-glyph
+//      quads, uploaded once as an INSTANCE buffer.
+//   4. A single instanced draw renders every glyph. The fragment shader
+//      treats the glyph image as a heightmap and lights it (see text.wgsl).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,22 +19,25 @@ use winit::{
     event::{Event, KeyEvent, WindowEvent},
     event_loop::EventLoop,
     keyboard::{Key, NamedKey},
-    window::WindowBuilder,
+    window::{Window, WindowBuilder},
 };
 
-const CELL: u32 = 256; // per-glyph texture size (must match gen_glyphs.py)
-const EM: f32 = 170.0; // font size used by gen_glyphs.py (for line spacing)
-const OX: f32 = 40.0; // pen origin x inside the cell (must match gen_glyphs.py)
-const OY: f32 = 195.0; // baseline y inside the cell (must match gen_glyphs.py)
+// These must match gen_glyphs.py.
+const CELL: u32 = 256; // per-glyph texture size in pixels
+const EM: f32 = 170.0; // font size (used for line spacing)
+const PEN: [f32; 2] = [40.0, 195.0]; // pen origin (x, baseline y) inside a cell
 
+/// One quad on screen = one character. This is the per-instance vertex data.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct Glyph {
-    pos: [f32; 2],
-    size: [f32; 2],
-    layer: u32,
+    pos: [f32; 2],  // top-left, in pixels
+    size: [f32; 2], // in pixels
+    layer: u32,     // which texture-array layer holds this character
 }
 
+/// Lighting parameters, uploaded every frame. Layout matches `U` in text.wgsl
+/// (WGSL pads vec3s to 16 bytes, so scalars are interleaved to fill the gaps).
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
@@ -45,131 +49,79 @@ struct Uniforms {
     light_color: [f32; 3],
     spec_strength: f32,
     albedo: [f32; 3],
-    dog_sigma: f32, // gaussian width (texels) for the angle estimate
+    dog_sigma: f32, // gaussian width (texels) for the surface-angle estimate
     mode: u32,      // 0 = lit, 1 = show heightmap, 2 = show normals
     _pad: [u32; 3],
 }
 
-struct GMeta {
+struct GlyphMeta {
     layer: u32,
-    advance: f32,
+    advance: f32, // pen advance in pixels (at EM size)
 }
 
-// Load the pre-rendered glyph textures + metrics from ./textures/ into one
-// layer-major buffer for a texture_2d_array.
-fn load_glyphs() -> (Vec<u8>, HashMap<char, GMeta>, Vec<char>) {
+/// Load the pre-rendered glyph PNGs + metrics from ./textures/ into one
+/// layer-major byte buffer, ready to upload as a texture_2d_array.
+fn load_glyphs() -> (Vec<u8>, HashMap<char, GlyphMeta>) {
     let dir = std::path::Path::new("textures");
     let metrics = std::fs::read_to_string(dir.join("metrics.txt"))
         .expect("textures/metrics.txt missing -- run `python3 gen_glyphs.py` first");
 
-    let mut data = Vec::new();
+    let mut pixels = Vec::new();
     let mut map = HashMap::new();
-    let mut chars = Vec::new();
     for (layer, line) in metrics.lines().enumerate() {
+        // each line: "<codepoint> <advance> <filename>"
         let mut it = line.split_whitespace();
-        let cp: u32 = it.next().unwrap().parse().unwrap();
+        let ch = char::from_u32(it.next().unwrap().parse().unwrap()).unwrap();
         let advance: f32 = it.next().unwrap().parse().unwrap();
         let file = it.next().unwrap();
-        let ch = char::from_u32(cp).unwrap();
 
         let img = image::open(dir.join(file)).unwrap().to_luma8();
         assert_eq!(img.dimensions(), (CELL, CELL), "texture {file} wrong size");
-        data.extend_from_slice(img.as_raw());
-        map.insert(
-            ch,
-            GMeta {
-                layer: layer as u32,
-                advance,
-            },
-        );
-        chars.push(ch);
+        pixels.extend_from_slice(img.as_raw());
+        map.insert(ch, GlyphMeta { layer: layer as u32, advance });
     }
-    (data, map, chars)
+    (pixels, map)
 }
 
-// CPU layout with word-wrap -> per-glyph quads.
-fn layout(
-    text: &str,
-    map: &HashMap<char, GMeta>,
-    scale: f32,
-    origin: [f32; 2],
-    max_w: f32,
-) -> (Vec<Glyph>, Vec<String>) {
-    let mut glyphs = Vec::new();
-    let mut lines = Vec::new();
-    let mut cur = String::new();
-    let space_adv = map[&' '].advance * scale;
-    let cell = CELL as f32 * scale;
+/// CPU text layout with word wrap: walk a pen across the screen, emitting one
+/// quad per character. Each quad is a full CELLxCELL cell positioned so the
+/// glyph's pen origin lands on the pen.
+fn layout(text: &str, map: &HashMap<char, GlyphMeta>, scale: f32) -> Vec<Glyph> {
+    let origin = [50.0, 150.0];
+    let max_w = 1080.0;
     let line_h = EM * scale * 1.35;
-    let mut pen_x = origin[0];
-    let mut pen_y = origin[1];
+    let cell = CELL as f32 * scale;
 
+    let mut glyphs = Vec::new();
+    let mut pen = origin;
     for word in text.split(' ') {
-        let w: f32 = word.chars().map(|c| map[&c].advance * scale).sum();
-        if pen_x > origin[0] && pen_x + w > origin[0] + max_w {
-            lines.push(std::mem::take(&mut cur));
-            pen_x = origin[0];
-            pen_y += line_h;
+        let word_w: f32 = word.chars().map(|c| map[&c].advance * scale).sum();
+        if pen[0] > origin[0] && pen[0] + word_w > origin[0] + max_w {
+            pen = [origin[0], pen[1] + line_h]; // wrap
         }
         for c in word.chars() {
             let g = &map[&c];
             glyphs.push(Glyph {
-                pos: [pen_x - OX * scale, pen_y - OY * scale],
+                pos: [pen[0] - PEN[0] * scale, pen[1] - PEN[1] * scale],
                 size: [cell, cell],
                 layer: g.layer,
             });
-            pen_x += g.advance * scale;
-            cur.push(c);
+            pen[0] += g.advance * scale;
         }
-        pen_x += space_adv;
-        cur.push(' ');
+        pen[0] += map[&' '].advance * scale;
     }
-    lines.push(cur);
-    (glyphs, lines)
+    glyphs
 }
 
-fn main() {
-    pollster::block_on(run());
-}
-
-async fn run() {
-    let text = "Hey Now Brown Cow!";
-
-    // debug view: --height shows the heightmap, --angle shows the normals
-    let args: Vec<String> = std::env::args().collect();
-    let mode: u32 = if args.iter().any(|a| a == "--height") {
-        1
-    } else if args.iter().any(|a| a == "--angle") {
-        2
-    } else {
-        0
-    };
-
-    // --- load pre-rendered glyph source textures ---
-    let (tex_data, gmap, chars) = load_glyphs();
-    let n_layers = chars.len() as u32;
-
-    let scale = 0.62;
-    let (glyphs, lines) = layout(text, &gmap, scale, [50.0, 150.0], 1080.0);
-    println!(
-        "loaded {} glyph textures; laid out {} glyphs:",
-        n_layers,
-        glyphs.len()
-    );
-    for l in &lines {
-        println!("  |{}|", l.trim_end());
-    }
-
-    // --- window + wgpu ---
-    let ev = EventLoop::new().unwrap();
-    let window = Arc::new(
-        WindowBuilder::new()
-            .with_title("shad-env: heightmap-lit text")
-            .with_inner_size(PhysicalSize::new(1200u32, 360u32))
-            .build(&ev)
-            .unwrap(),
-    );
-
+/// Standard wgpu boilerplate: surface, adapter, device, surface config.
+async fn init_wgpu(
+    window: Arc<Window>,
+) -> (
+    wgpu::Surface<'static>,
+    wgpu::Device,
+    wgpu::Queue,
+    wgpu::SurfaceConfiguration,
+) {
     let instance = wgpu::Instance::default();
     let surface = instance.create_surface(window.clone()).unwrap();
     let adapter = instance
@@ -186,13 +138,14 @@ async fn run() {
 
     let size = window.inner_size();
     let caps = surface.get_capabilities(&adapter);
+    // prefer a non-sRGB format so the shader's output colors are used as-is
     let format = caps
         .formats
         .iter()
         .copied()
         .find(|f| !f.is_srgb())
         .unwrap_or(caps.formats[0]);
-    let mut config = wgpu::SurfaceConfiguration {
+    let config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format,
         width: size.width,
@@ -203,15 +156,24 @@ async fn run() {
         desired_maximum_frame_latency: 2,
     };
     surface.configure(&device, &config);
+    (surface, device, queue, config)
+}
 
-    // --- upload glyph heightmaps as a texture array ---
-    let font_tex = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("font glyphs"),
-        size: wgpu::Extent3d {
-            width: CELL,
-            height: CELL,
-            depth_or_array_layers: n_layers,
-        },
+/// Upload all glyph images as one texture_2d_array (R8 = single gray channel).
+fn create_glyph_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pixels: &[u8],
+    layers: u32,
+) -> wgpu::TextureView {
+    let size = wgpu::Extent3d {
+        width: CELL,
+        height: CELL,
+        depth_or_array_layers: layers,
+    };
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("glyph heightmaps"),
+        size,
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -220,48 +182,34 @@ async fn run() {
         view_formats: &[],
     });
     queue.write_texture(
-        wgpu::ImageCopyTexture {
-            texture: &font_tex,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &tex_data,
+        tex.as_image_copy(),
+        pixels,
         wgpu::ImageDataLayout {
             offset: 0,
-            bytes_per_row: Some(CELL),
+            bytes_per_row: Some(CELL), // 1 byte per pixel
             rows_per_image: Some(CELL),
         },
-        wgpu::Extent3d {
-            width: CELL,
-            height: CELL,
-            depth_or_array_layers: n_layers,
-        },
+        size,
     );
-    let font_view = font_tex.create_view(&wgpu::TextureViewDescriptor {
+    tex.create_view(&wgpu::TextureViewDescriptor {
         dimension: Some(wgpu::TextureViewDimension::D2Array),
         ..Default::default()
-    });
-    let samp = device.create_sampler(&wgpu::SamplerDescriptor {
+    })
+}
+
+/// Build the render pipeline + bind group: uniforms, glyph texture, sampler.
+fn create_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    uniform_buf: &wgpu::Buffer,
+    glyph_view: &wgpu::TextureView,
+) -> (wgpu::RenderPipeline, wgpu::BindGroup) {
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         mag_filter: wgpu::FilterMode::Linear,
         min_filter: wgpu::FilterMode::Linear,
         ..Default::default()
     });
 
-    // --- buffers ---
-    let instances = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("glyph instances"),
-        contents: bytemuck::cast_slice(&glyphs),
-        usage: wgpu::BufferUsages::VERTEX,
-    });
-    let ubuf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("uniforms"),
-        size: std::mem::size_of::<Uniforms>() as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    // --- bind group ---
     let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: None,
         entries: &[
@@ -293,60 +241,44 @@ async fn run() {
             },
         ],
     });
-    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &bgl,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: ubuf.as_entire_binding(),
+                resource: uniform_buf.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::TextureView(&font_view),
+                resource: wgpu::BindingResource::TextureView(glyph_view),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: wgpu::BindingResource::Sampler(&samp),
+                resource: wgpu::BindingResource::Sampler(&sampler),
             },
         ],
     });
 
-    // --- pipeline ---
     let shader = device.create_shader_module(wgpu::include_wgsl!("text.wgsl"));
-    let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: None,
         bind_group_layouts: &[&bgl],
         push_constant_ranges: &[],
     });
-    let inst_layout = wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<Glyph>() as u64,
-        step_mode: wgpu::VertexStepMode::Instance,
-        attributes: &[
-            wgpu::VertexAttribute {
-                offset: 0,
-                shader_location: 0,
-                format: wgpu::VertexFormat::Float32x2,
-            },
-            wgpu::VertexAttribute {
-                offset: 8,
-                shader_location: 1,
-                format: wgpu::VertexFormat::Float32x2,
-            },
-            wgpu::VertexAttribute {
-                offset: 16,
-                shader_location: 2,
-                format: wgpu::VertexFormat::Uint32,
-            },
-        ],
-    };
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: None,
-        layout: Some(&pl),
+        layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: &shader,
             entry_point: "vs",
-            buffers: &[inst_layout],
+            // no vertex buffer -- corners come from vertex_index; this buffer
+            // steps once per INSTANCE and carries one Glyph
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<Glyph>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Uint32],
+            }],
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
@@ -358,28 +290,67 @@ async fn run() {
             })],
         }),
         primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleStrip,
+            topology: wgpu::PrimitiveTopology::TriangleStrip, // 4 verts = quad
             ..Default::default()
         },
         depth_stencil: None,
         multisample: Default::default(),
         multiview: None,
     });
+    (pipeline, bind_group)
+}
+
+fn main() {
+    pollster::block_on(run());
+}
+
+async fn run() {
+    // debug views: --height shows the heightmap, --angle shows the normals
+    let mode = match std::env::args().nth(1).as_deref() {
+        Some("--height") => 1u32,
+        Some("--angle") => 2,
+        _ => 0,
+    };
+
+    let (pixels, glyph_map) = load_glyphs();
+    let glyphs = layout("Hey Now Brown Cow!", &glyph_map, 0.62);
+    println!("{} glyph textures, {} glyphs on screen", glyph_map.len(), glyphs.len());
+
+    let event_loop = EventLoop::new().unwrap();
+    let window = Arc::new(
+        WindowBuilder::new()
+            .with_title("shad-env: heightmap-lit text")
+            .with_inner_size(PhysicalSize::new(1200u32, 360u32))
+            .build(&event_loop)
+            .unwrap(),
+    );
+    let (surface, device, queue, mut config) = init_wgpu(window.clone()).await;
+
+    let glyph_view = create_glyph_texture(&device, &queue, &pixels, glyph_map.len() as u32);
+    let instance_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("glyph instances"),
+        contents: bytemuck::cast_slice(&glyphs),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("uniforms"),
+        size: std::mem::size_of::<Uniforms>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let (pipeline, bind_group) = create_pipeline(&device, config.format, &uniform_buf, &glyph_view);
 
     let n_glyphs = glyphs.len() as u32;
     let start = Instant::now();
 
-    ev.run(move |event, elwt| {
-        elwt.set_control_flow(winit::event_loop::ControlFlow::Poll);
-        if let Event::WindowEvent { event, .. } = event {
+    event_loop
+        .run(move |event, elwt| {
+            elwt.set_control_flow(winit::event_loop::ControlFlow::Poll);
+            let Event::WindowEvent { event, .. } = event else { return };
             match event {
                 WindowEvent::CloseRequested
                 | WindowEvent::KeyboardInput {
-                    event:
-                        KeyEvent {
-                            logical_key: Key::Named(NamedKey::Escape),
-                            ..
-                        },
+                    event: KeyEvent { logical_key: Key::Named(NamedKey::Escape), .. },
                     ..
                 } => elwt.exit(),
                 WindowEvent::Resized(s) => {
@@ -390,7 +361,7 @@ async fn run() {
                 WindowEvent::RedrawRequested => {
                     // animate the light direction so highlights sweep across
                     let t = start.elapsed().as_secs_f32();
-                    let u = Uniforms {
+                    let uniforms = Uniforms {
                         resolution: [config.width as f32, config.height as f32],
                         height_scale: 9.0,
                         shininess: 28.0,
@@ -403,19 +374,16 @@ async fn run() {
                         mode,
                         _pad: [0; 3],
                     };
-                    queue.write_buffer(&ubuf, 0, bytemuck::bytes_of(&u));
+                    queue.write_buffer(&uniform_buf, 0, bytemuck::bytes_of(&uniforms));
 
-                    let frame = match surface.get_current_texture() {
-                        Ok(f) => f,
-                        Err(_) => {
-                            surface.configure(&device, &config);
-                            return;
-                        }
+                    let Ok(frame) = surface.get_current_texture() else {
+                        surface.configure(&device, &config); // lost surface: recreate
+                        return;
                     };
                     let view = frame.texture.create_view(&Default::default());
-                    let mut enc = device.create_command_encoder(&Default::default());
+                    let mut encoder = device.create_command_encoder(&Default::default());
                     {
-                        let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                             label: None,
                             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                                 view: &view,
@@ -434,18 +402,17 @@ async fn run() {
                             timestamp_writes: None,
                             occlusion_query_set: None,
                         });
-                        rp.set_pipeline(&pipeline);
-                        rp.set_bind_group(0, &bind, &[]);
-                        rp.set_vertex_buffer(0, instances.slice(..));
-                        rp.draw(0..4, 0..n_glyphs); // 4 strip verts x N glyphs, one draw
+                        pass.set_pipeline(&pipeline);
+                        pass.set_bind_group(0, &bind_group, &[]);
+                        pass.set_vertex_buffer(0, instance_buf.slice(..));
+                        pass.draw(0..4, 0..n_glyphs); // 4 strip verts x N glyphs, ONE draw call
                     }
-                    queue.submit([enc.finish()]);
+                    queue.submit([encoder.finish()]);
                     frame.present();
                     window.request_redraw();
                 }
                 _ => {}
             }
-        }
-    })
-    .unwrap();
+        })
+        .unwrap();
 }
