@@ -7,11 +7,15 @@ are composed by placing, layering, and feeding inputs to these shader-rects.
 
 ## Concepts
 
-- **shader** — a registered fragment shader, referenced by handle.
-- **shad** — an instance of a shader bound to a rectangular subregion of the window.
-- **inputs** — uniforms passed to a shad (time, resolution, mouse, user values).
+The whole graphical basis is four nouns, each unopinionated:
 
-Drawing is ordered by `z` (low first), then insertion order.
+- **shad** — a shader bound to a rectangle; the only drawable.
+- **shader** — the logic, referenced by handle.
+- **texture** — a 2D data source (and a texture can be a render target).
+- **buffer** — an array data source (uniforms are just a small prebaked buffer).
+
+What a texture or buffer *means* is the shader's business. Drawing is ordered by
+`z` (low first), then insertion order.
 
 ## Library (`src/lib.rs`)
 
@@ -21,21 +25,20 @@ and drives it. Conventions: command/query separation (mutators return only
 `Result<(), _>`, queries return values), explicit caller-chosen handles (no
 internal ids), and one universal `Bgra8Unorm` surface format.
 
-| method | kind | purpose |
-|---|---|---|
-| `new()` | query | build device-level wgpu state (no surface) |
-| `configure(window)` | command | create + configure the surface |
-| `resize(w, h)` | command | reconfigure on winit `Resized` |
-| `register_shader(handle, path, hash, validate)` | command | optionally hash-validate, compile, store |
-| `register_texture(handle, rgba, w, h)` | command | store a 2D data source (raw RGBA8) |
-| `register_buffer(handle, bytes)` | command | store an array data source (raw bytes) |
-| `add_shad(handle, shader, corners, z)` | command | bind a shader to a rect |
-| `move_shad(handle, corners, z)` | command | move/relayer a shad |
-| `set_uniform_value(handle, name, val)` | command | write a named user slot |
-| `set_texture(shad, tex)` | command | bind a texture to a shad (`tex`/`samp`) |
-| `set_buffer(shad, buf)` | command | bind a buffer to a shad (`buf`) |
-| `render()` | command | draw all shads (z, then order) + present |
-| `get_shad_data(handle)` | query | snapshot rect/z/uniforms |
+| method | purpose |
+|---|---|
+| `new()` | build device-level wgpu state (no surface) |
+| `configure(window)` | create + configure the surface |
+| `resize(w, h)` | reconfigure on winit `Resized` |
+| `register_shader(handle, path, hash, validate)` | optionally hash-validate, compile, store |
+| `register_texture(handle, rgba, w, h)` | store a 2D data source (raw RGBA8) |
+| `register_buffer(handle, bytes)` | store an array data source (raw bytes) |
+| `add_shad(handle, shader, corners, z)` | bind a shader to a rect |
+| `move_shad(handle, corners, z)` | move/relayer a shad |
+| `set_uniform_value(handle, name, val)` | write a named user slot |
+| `set_texture(shad, tex)` | bind a texture to a shad (`tex`/`samp`) |
+| `set_buffer(shad, buf)` | bind a buffer to a shad (`buf`) |
+| `render()` | draw all shads (z, then order) + present |
 
 **Shader inputs** (`src/shared.wgsl`): builtins `rect`/`resolution`/`mouse`/`time`;
 generic user slots `s0..s3` (scalars) and `v0..v3` (vec4s) via `set_uniform_value`;
