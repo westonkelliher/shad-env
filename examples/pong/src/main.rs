@@ -28,6 +28,18 @@ const PADDLE_HALF: f32 = 55.0;
 const BALL_R: f32 = 9.0;
 const PADDLE_SPEED: f32 = 380.0;
 const AI_SPEED: f32 = 330.0;
+const BALL_SPEED: f32 = 300.0; // starting speed; restored after each score
+const SPEEDUP: f32 = 1.035; // ball gets 3.5% faster on every paddle hit
+const MAX_BOUNCE: f32 = 1.0472; // 60deg: angle off horizontal at the paddle edge
+
+fn mag(v: [f32; 2]) -> f32 {
+    (v[0] * v[0] + v[1] * v[1]).sqrt()
+}
+/// Same direction as `v`, rescaled to `speed`.
+fn rescale(v: [f32; 2], speed: f32) -> [f32; 2] {
+    let m = mag(v);
+    [v[0] / m * speed, v[1] / m * speed]
+}
 
 // Each shader, pinned to the hash of its file (version-control guard: if the
 // .wgsl changes without updating the hash, register_shader errors out).
@@ -67,7 +79,7 @@ impl Game {
     fn new() -> Game {
         Game {
             ball: [W / 2.0, H / 2.0],
-            vel: [-260.0, 150.0],
+            vel: rescale([-2.5, 1.0], BALL_SPEED),
             left_y: H / 2.0,
             right_y: H / 2.0,
             score_l: 0,
@@ -116,7 +128,11 @@ impl Game {
             && self.ball[0] - BALL_R >= LEFT_FACE - 24.0
             && (self.ball[1] - self.left_y).abs() <= PADDLE_HALF
         {
-            self.vel[0] = self.vel[0].abs();
+            // angle depends on where on the paddle it hit; 3.5% faster
+            let rel = ((self.ball[1] - self.left_y) / PADDLE_HALF).clamp(-1.0, 1.0);
+            let angle = rel * MAX_BOUNCE;
+            let speed = mag(self.vel) * SPEEDUP;
+            self.vel = [speed * angle.cos(), speed * angle.sin()]; // heading right
             self.ball[0] = LEFT_FACE + BALL_R;
         }
         if self.vel[0] > 0.0
@@ -124,17 +140,22 @@ impl Game {
             && self.ball[0] + BALL_R <= RIGHT_FACE + 24.0
             && (self.ball[1] - self.right_y).abs() <= PADDLE_HALF
         {
-            self.vel[0] = -self.vel[0].abs();
+            let rel = ((self.ball[1] - self.right_y) / PADDLE_HALF).clamp(-1.0, 1.0);
+            let angle = rel * MAX_BOUNCE;
+            let speed = mag(self.vel) * SPEEDUP;
+            self.vel = [-speed * angle.cos(), speed * angle.sin()]; // heading left
             self.ball[0] = RIGHT_FACE - BALL_R;
         }
 
-        // scoring: reset to middle, velocity unchanged (per spec)
+        // scoring: reset to middle and to the starting speed, keeping direction
         if self.ball[0] < -BALL_R {
             self.score_r += 1;
             self.ball = [W / 2.0, H / 2.0];
+            self.vel = rescale(self.vel, BALL_SPEED);
         } else if self.ball[0] > W + BALL_R {
             self.score_l += 1;
             self.ball = [W / 2.0, H / 2.0];
+            self.vel = rescale(self.vel, BALL_SPEED);
         }
     }
 
