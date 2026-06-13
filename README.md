@@ -12,15 +12,13 @@ are composed by placing, layering, and feeding inputs to these shader-rects.
 
 ## Concepts
 
-The whole graphical basis is four nouns, each unopinionated:
-
 - **shad** — a shader bound to a rectangle; the only drawable.
 - **shader** — the logic, referenced by handle.
 - **texture** — a 2D data source (and a texture can be a render target).
 - **buffer** — an array data source (uniforms are just a small prebaked buffer).
 
-What a texture or buffer *means* is the shader's business. Drawing is ordered by
-`z` (low first), then insertion order.
+Interpreting the texture or buffer is the shader's business.
+
 
 ## Library (`src/lib.rs`)
 
