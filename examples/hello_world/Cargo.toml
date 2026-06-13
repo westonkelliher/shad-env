@@ -1,5 +1,5 @@
 [package]
-name = "text"
+name = "hello_world"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,4 +8,4 @@ shad-env = { path = "../.." }
 winit = "0.29"
 pollster = "0.3"
 bytemuck = "1"
-font8x8 = "0.3"
+image = { version = "0.25", default-features = false, features = ["png"] }

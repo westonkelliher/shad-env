@@ -1,6 +1,6 @@
 // One shad draws a whole line of text. The shad's rect subdivides INTO character
 // cells inside the shader -- no per-glyph shads, no instancing. Two data sources:
-//   tex = an ASCII atlas, 16 cols x 8 rows of 8x8 glyphs (white ink, alpha mask)
+//   tex = an ASCII spritesheet, 16 cols x 8 rows of glyphs (white ink, alpha mask)
 //   buf = the string, one ASCII codepoint per u32
 //   s0  = the character count N
 // Per pixel: find which cell we're in, read that cell's codepoint, sample its
