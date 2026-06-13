@@ -11,21 +11,25 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
   let n = u32(round(u.scalars.x));
   if (n == 0u) { return vec4(0.0); }      // uniform branch: safe for sampling
 
-  let col = min(u32(floor(in.uv.x * f32(n))), n - 1u);
-  var cell = vec2(fract(in.uv.x * f32(n)), in.uv.y); // 0..1 within the cell
-  let code = buf[col];
+  // Kern via pen advance: each glyph is still drawn at full cell width (1/n,
+  // undistorted), but the pen advances by only ADV of that per char. ADV<1
+  // overlaps neighbors -- their transparent side padding overlaps harmlessly,
+  // tightening the spacing. So a pixel can sit under two glyphs; sample both
+  // candidate columns and keep the max coverage.
+  let ADV = 0.66;
+  let t = in.uv.x * f32(n);          // position in cell-widths along the line
+  let g_hi = i32(floor(t / ADV));    // rightmost glyph that could cover this px
 
-  // Kern: glyphs are baked centered in square cells with side padding, so the
-  // text reads loose. Zoom horizontally into the cell (<1 crops side padding,
-  // pulling glyphs closer) to tighten the spacing a bit.
-  let KERN = 0.82;
-  cell.x = 0.5 + (cell.x - 0.5) * KERN;
-
-  // atlas cell for this codepoint (16 x 8 grid)
-  let ac = vec2(f32(code % 16u), f32(code / 16u));
-  let atlas_uv = (ac + cell) / vec2(16.0, 8.0);
+  var cover = 0.0;
+  for (var g = g_hi - 1; g <= g_hi; g++) {
+    let lx = t - f32(g) * ADV;       // x within glyph g's cell, 0..1 if covered
+    if (g < 0 || u32(g) >= n || lx < 0.0 || lx > 1.0) { continue; }
+    let code = buf[g];
+    let ac = vec2(f32(code % 16u), f32(code / 16u));
+    let atlas_uv = (ac + vec2(lx, in.uv.y)) / vec2(16.0, 8.0);
+    cover = max(cover, textureSample(tex, samp, atlas_uv).a);
+  }
 
   let ink = vec3(0.96, 0.86, 0.42);
-  let cover = textureSample(tex, samp, atlas_uv).a;
   return vec4(ink, cover);
 }

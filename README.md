@@ -54,6 +54,9 @@ See `specs/shad_env_api.rs` for the prototypes + design rules.
 
 - **`examples/pong/`** — a full game: a ball shad moved each frame, full-height
   paddle strips fed their position via uniforms, and 7-segment score digits.
+  `cargo run -- --screenshot [path]` renders a frame headlessly to a PNG:
+
+  ![pong](examples/pong/screenshot.png)
 - **`examples/hello_world/`** — one shad renders a whole line of text by reading an
   ASCII spritesheet PNG (`tex`, baked by `gen_atlas.py`) and the string's codepoints
   (`buf`), carving its rect into character cells in-shader. Shows off

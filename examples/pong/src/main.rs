@@ -177,7 +177,47 @@ impl Game {
 }
 
 fn main() {
-    pollster::block_on(run());
+    // `cargo run -- --screenshot [path]` advances the (deterministic) sim to a
+    // representative frame and renders it offscreen to a PNG -- no window.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--screenshot") {
+        let path = args.get(2).map_or("pong.png", String::as_str);
+        pollster::block_on(screenshot(path));
+    } else {
+        pollster::block_on(run());
+    }
+}
+
+/// Register every shader and place the ball / paddle / score shads.
+fn setup(env: &mut ShadEnv) {
+    for (handle, path, hash) in SHADERS {
+        env.register_shader(handle, path, hash, true).unwrap();
+    }
+
+    // ball follows the ball; paddles are fixed full-height strips; scores sit
+    // at the top corners. (x1,y1,x2,y2 corners.)
+    env.add_shad("ball", "ball", [0.0, 0.0, 2.0 * BALL_R, 2.0 * BALL_R], Some(1.0)).unwrap();
+    env.add_shad("left", "paddle", [24.0, 0.0, LEFT_FACE, H], None).unwrap();
+    env.add_shad("right", "paddle", [RIGHT_FACE, 0.0, RIGHT_FACE + PADDLE_W, H], None).unwrap();
+    env.add_shad("score_l", "digit", [W * 0.25 - 25.0, 20.0, W * 0.25 + 25.0, 90.0], None).unwrap();
+    env.add_shad("score_r", "digit", [W * 0.75 - 25.0, 20.0, W * 0.75 + 25.0, 90.0], None).unwrap();
+}
+
+/// Headless: step the deterministic sim to a lively frame, render it to `path`.
+async fn screenshot(path: &str) {
+    let mut env = ShadEnv::new().await;
+    setup(&mut env);
+    let mut game = Game::new();
+    for _ in 0..220 {
+        game.update(1.0 / 60.0); // fixed dt -> reproducible composition
+    }
+    game.sync(&mut env);
+    let rgba = env.render_to_target(W as u32, H as u32).unwrap();
+    image::RgbaImage::from_raw(W as u32, H as u32, rgba)
+        .expect("buffer size matches dimensions")
+        .save(path)
+        .unwrap();
+    println!("wrote {path}");
 }
 
 async fn run() {
@@ -192,18 +232,7 @@ async fn run() {
 
     let mut env = ShadEnv::new().await;
     env.configure(window.clone()).unwrap();
-
-    for (handle, path, hash) in SHADERS {
-        env.register_shader(handle, path, hash, true).unwrap();
-    }
-
-    // ball follows the ball; paddles are fixed full-height strips; scores sit
-    // at the top corners. (x1,y1,x2,y2 corners.)
-    env.add_shad("ball", "ball", [0.0, 0.0, 2.0 * BALL_R, 2.0 * BALL_R], Some(1.0)).unwrap();
-    env.add_shad("left", "paddle", [24.0, 0.0, LEFT_FACE, H], None).unwrap();
-    env.add_shad("right", "paddle", [RIGHT_FACE, 0.0, RIGHT_FACE + PADDLE_W, H], None).unwrap();
-    env.add_shad("score_l", "digit", [W * 0.25 - 25.0, 20.0, W * 0.25 + 25.0, 90.0], None).unwrap();
-    env.add_shad("score_r", "digit", [W * 0.75 - 25.0, 20.0, W * 0.75 + 25.0, 90.0], None).unwrap();
+    setup(&mut env);
 
     let mut game = Game::new();
     let mut last = Instant::now();
