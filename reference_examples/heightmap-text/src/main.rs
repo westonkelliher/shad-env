@@ -370,7 +370,7 @@ async fn run() {
                         light_color: [1.0, 0.96, 0.88],
                         spec_strength: 0.7,
                         albedo: [0.85, 0.45, 0.2],
-                        dog_sigma: 2.0,
+                        dog_sigma: 1.0,
                         mode,
                         _pad: [0; 3],
                     };
