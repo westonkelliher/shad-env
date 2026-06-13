@@ -1,10 +1,10 @@
 [package]
-name = "hello_world"
+name = "windowed-shad-env"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-shad-env = { path = "../.." }
-windowed-shad-env = { path = "../../windowed-shad-env" }
-bytemuck = "1"
+shad-env = { path = ".." }
+winit = "0.29"
+pollster = "0.3"
 image = { version = "0.25", default-features = false, features = ["png"] }

@@ -7,15 +7,8 @@
 // The atlas (`ascii_atlas.png`, a 16x8 grid of 32px glyph cells indexed by
 // codepoint) is baked by `gen_atlas.py`; here we just decode it with `image`.
 
-use std::sync::Arc;
-
-use shad_env::{wgpu, ShadEnv, UniformValue::Scalar};
-use winit::{
-    dpi::PhysicalSize,
-    event::{Event, WindowEvent},
-    event_loop::EventLoop,
-    window::WindowBuilder,
-};
+use shad_env::{ShadEnv, UniformValue::Scalar};
+use windowed_shad_env::App;
 
 const MSG: &str = "Hello, World!";
 const W: f32 = 600.0;
@@ -33,15 +26,12 @@ fn load_atlas() -> (Vec<u8>, u32, u32) {
 }
 
 fn main() {
-    // `cargo run -- --screenshot [path]` renders one offscreen frame to a PNG
-    // (no window); otherwise open a live window. Same scene, same shaders.
-    let args: Vec<String> = std::env::args().collect();
-    if args.get(1).map(String::as_str) == Some("--screenshot") {
-        let path = args.get(2).map_or("hello_world.png", String::as_str);
-        pollster::block_on(screenshot(path));
-    } else {
-        pollster::block_on(run());
-    }
+    // A static scene: windowed-shad-env owns the window/surface/loop and the
+    // `--screenshot` mode; we only register the shad in `setup`. No per-frame
+    // logic, so `update` is a no-op.
+    App::new("shad-env: hello_world", W as u32, H as u32)
+        .screenshot_path("hello_world.png")
+        .run(setup, |_env, _dt, _input| {});
 }
 
 /// Register the shader + atlas + message and place the one centered shad.
@@ -71,90 +61,3 @@ fn setup(env: &mut ShadEnv) {
     env.set_uniform_value("label", "s0", Scalar(codes.len() as f32)).unwrap();
 }
 
-/// Headless: render one frame into our own offscreen texture and write it to
-/// `path` as a PNG. shad-env doesn't own targets -- we allocate one, hand it to
-/// `render_to`, then pull it back to the CPU with `read_rgba`.
-async fn screenshot(path: &str) {
-    let mut env = ShadEnv::new().await;
-    setup(&mut env);
-    let (w, h) = (W as u32, H as u32);
-    let target = env.device().create_texture(&wgpu::TextureDescriptor {
-        label: Some("screenshot"),
-        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: ShadEnv::FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    env.render_to(&target.create_view(&Default::default()), w, h);
-    let rgba = shad_env::read_rgba(env.device(), env.queue(), &target, w, h);
-    image::RgbaImage::from_raw(w, h, rgba)
-        .expect("buffer size matches dimensions")
-        .save(path)
-        .unwrap();
-    println!("wrote {path}");
-}
-
-async fn run() {
-    let event_loop = EventLoop::new().unwrap();
-    let window = Arc::new(
-        WindowBuilder::new()
-            .with_title("shad-env: hello_world")
-            .with_inner_size(PhysicalSize::new(W as u32, H as u32))
-            .build(&event_loop)
-            .unwrap(),
-    );
-
-    let mut env = ShadEnv::new().await;
-    setup(&mut env);
-
-    // The app owns the surface + swapchain loop; shad-env only draws into the
-    // frame view we hand it. Build the surface from shad-env's wgpu handles.
-    let surface = env.instance().create_surface(window.clone()).unwrap();
-    let size = window.inner_size();
-    let mut config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        format: ShadEnv::FORMAT,
-        width: size.width.max(1),
-        height: size.height.max(1),
-        present_mode: wgpu::PresentMode::Fifo,
-        alpha_mode: surface.get_capabilities(env.adapter()).alpha_modes[0],
-        view_formats: vec![],
-        desired_maximum_frame_latency: 2,
-    };
-    surface.configure(env.device(), &config);
-
-    event_loop
-        .run(move |event, elwt| {
-            let Event::WindowEvent { event, .. } = event else { return };
-            match event {
-                WindowEvent::CloseRequested => elwt.exit(),
-                WindowEvent::Resized(s) => {
-                    config.width = s.width.max(1);
-                    config.height = s.height.max(1);
-                    surface.configure(env.device(), &config);
-                }
-                WindowEvent::RedrawRequested => {
-                    let frame = match surface.get_current_texture() {
-                        Ok(f) => f,
-                        // transient loss: reconfigure and skip this frame
-                        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                            surface.configure(env.device(), &config);
-                            return;
-                        }
-                        Err(e) => {
-                            eprintln!("surface error: {e:?}");
-                            return;
-                        }
-                    };
-                    let view = frame.texture.create_view(&Default::default());
-                    env.render_to(&view, config.width, config.height);
-                    frame.present();
-                }
-                _ => {}
-            }
-        })
-        .unwrap();
-}

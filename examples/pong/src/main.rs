@@ -1,23 +1,14 @@
-// Pong, built on the shad-env lib. The lib owns all wgpu state and just draws
-// shader-rects fed by uniforms; THIS file owns the window, the event loop, and
-// every bit of game logic. See specs/pong_on_shad.txt.
+// Pong, built on windowed-shad-env. That crate owns the window, surface, and
+// event loop; shad-env owns the wgpu state and draws the shader-rects; THIS file
+// is just game logic + shad calls. See specs/pong_on_shad.txt.
 //
 //   - ball   : a small rect we move_shad to the ball's position each frame
 //   - paddles: FIXED full-height strips; the paddle's position/size is pushed
 //              in via set_uniform_value (s0 = center, s1 = half-height)
 //   - scores : 7-segment digit shads, the count pushed in via s0
 
-use std::sync::Arc;
-use std::time::Instant;
-
-use shad_env::{wgpu, ShadEnv, UniformValue::Scalar};
-use winit::{
-    dpi::PhysicalSize,
-    event::{ElementState, Event, KeyEvent, WindowEvent},
-    event_loop::EventLoop,
-    keyboard::{Key, NamedKey},
-    window::WindowBuilder,
-};
+use shad_env::{ShadEnv, UniformValue::Scalar};
+use windowed_shad_env::{App, Key, NamedKey};
 
 const W: f32 = 800.0;
 const H: f32 = 500.0;
@@ -177,15 +168,19 @@ impl Game {
 }
 
 fn main() {
-    // `cargo run -- --screenshot [path]` advances the (deterministic) sim to a
-    // representative frame and renders it offscreen to a PNG -- no window.
-    let args: Vec<String> = std::env::args().collect();
-    if args.get(1).map(String::as_str) == Some("--screenshot") {
-        let path = args.get(2).map_or("pong.png", String::as_str);
-        pollster::block_on(screenshot(path));
-    } else {
-        pollster::block_on(run());
-    }
+    // windowed-shad-env owns the window/surface/loop and the `--screenshot`
+    // mode; we hand it setup + a per-frame closure. The warmup advances the
+    // deterministic sim to a lively frame before a headless shot.
+    let mut game = Game::new();
+    App::new("shad-env: pong", W as u32, H as u32)
+        .screenshot_path("pong.png")
+        .screenshot_warmup(220, 1.0 / 60.0)
+        .run(setup, move |env, dt, input| {
+            game.up = input.held(Key::Named(NamedKey::ArrowUp));
+            game.down = input.held(Key::Named(NamedKey::ArrowDown));
+            game.update(dt);
+            game.sync(env);
+        });
 }
 
 /// Register every shader and place the ball / paddle / score shads.
@@ -203,112 +198,3 @@ fn setup(env: &mut ShadEnv) {
     env.add_shad("score_r", "digit", [W * 0.75 - 25.0, 20.0, W * 0.75 + 25.0, 90.0], None).unwrap();
 }
 
-/// Headless: step the deterministic sim to a lively frame, render it to `path`.
-async fn screenshot(path: &str) {
-    let mut env = ShadEnv::new().await;
-    setup(&mut env);
-    let mut game = Game::new();
-    for _ in 0..220 {
-        game.update(1.0 / 60.0); // fixed dt -> reproducible composition
-    }
-    game.sync(&mut env);
-    let (w, h) = (W as u32, H as u32);
-    let target = env.device().create_texture(&wgpu::TextureDescriptor {
-        label: Some("screenshot"),
-        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: ShadEnv::FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    env.render_to(&target.create_view(&Default::default()), w, h);
-    let rgba = shad_env::read_rgba(env.device(), env.queue(), &target, w, h);
-    image::RgbaImage::from_raw(w, h, rgba)
-        .expect("buffer size matches dimensions")
-        .save(path)
-        .unwrap();
-    println!("wrote {path}");
-}
-
-async fn run() {
-    let event_loop = EventLoop::new().unwrap();
-    let window = Arc::new(
-        WindowBuilder::new()
-            .with_title("shad-env: pong")
-            .with_inner_size(PhysicalSize::new(W as u32, H as u32))
-            .build(&event_loop)
-            .unwrap(),
-    );
-
-    let mut env = ShadEnv::new().await;
-    setup(&mut env);
-
-    // The app owns the surface + swapchain loop; shad-env only draws into the
-    // frame view we hand it. Build the surface from shad-env's wgpu handles.
-    let surface = env.instance().create_surface(window.clone()).unwrap();
-    let size = window.inner_size();
-    let mut config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        format: ShadEnv::FORMAT,
-        width: size.width.max(1),
-        height: size.height.max(1),
-        present_mode: wgpu::PresentMode::Fifo,
-        alpha_mode: surface.get_capabilities(env.adapter()).alpha_modes[0],
-        view_formats: vec![],
-        desired_maximum_frame_latency: 2,
-    };
-    surface.configure(env.device(), &config);
-
-    let mut game = Game::new();
-    let mut last = Instant::now();
-
-    event_loop
-        .run(move |event, elwt| {
-            elwt.set_control_flow(winit::event_loop::ControlFlow::Poll);
-            let Event::WindowEvent { event, .. } = event else { return };
-            match event {
-                WindowEvent::CloseRequested => elwt.exit(),
-                WindowEvent::KeyboardInput { event: KeyEvent { logical_key, state, .. }, .. } => {
-                    let down = state == ElementState::Pressed;
-                    match logical_key {
-                        Key::Named(NamedKey::Escape) => elwt.exit(),
-                        Key::Named(NamedKey::ArrowUp) => game.up = down,
-                        Key::Named(NamedKey::ArrowDown) => game.down = down,
-                        _ => {}
-                    }
-                }
-                WindowEvent::Resized(s) => {
-                    config.width = s.width.max(1);
-                    config.height = s.height.max(1);
-                    surface.configure(env.device(), &config);
-                }
-                WindowEvent::RedrawRequested => {
-                    let now = Instant::now();
-                    let dt = (now - last).as_secs_f32().min(0.05);
-                    last = now;
-
-                    game.update(dt);
-                    game.sync(&mut env);
-                    let frame = match surface.get_current_texture() {
-                        Ok(f) => f,
-                        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                            surface.configure(env.device(), &config);
-                            return;
-                        }
-                        Err(e) => {
-                            eprintln!("surface error: {e:?}");
-                            return;
-                        }
-                    };
-                    let view = frame.texture.create_view(&Default::default());
-                    env.render_to(&view, config.width, config.height);
-                    frame.present();
-                    window.request_redraw();
-                }
-                _ => {}
-            }
-        })
-        .unwrap();
-}

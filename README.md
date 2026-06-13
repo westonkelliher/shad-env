@@ -58,6 +58,23 @@ FNV-1a-64 hex of the file (`content_hash`); when `validate` is true, a mismatch 
 
 See `specs/shad_env_api.rs` for the prototypes + design rules.
 
+## Windowing (`windowed-shad-env/`)
+
+A companion crate that is the deliberate opposite of shad-env's no-target purity:
+it **owns** the window, surface, and swapchain loop. An app hands it a
+`setup(&mut ShadEnv)` and a per-frame `update(&mut ShadEnv, dt, &Input)` and writes
+zero winit/surface code — the wrapper builds the surface from shad-env's handles,
+runs the event loop (resize/close/Esc), drives each frame (acquire → update →
+`render_to` → present), and supplies dt + a held-key `Input`. It also folds in the
+headless `--screenshot [path]` mode (one offscreen frame + `read_rgba` → PNG), with
+a `screenshot_warmup(steps, dt)` hook so a deterministic sim lands on a lively frame.
+
+```rust
+windowed_shad_env::App::new("title", 800, 500)
+    .screenshot_warmup(220, 1.0 / 60.0)
+    .run(setup, move |env, dt, input| { /* game logic + shad calls */ });
+```
+
 ## Examples
 
 - **`examples/pong/`** — a full game: a ball shad moved each frame, full-height
@@ -71,9 +88,10 @@ See `specs/shad_env_api.rs` for the prototypes + design rules.
 
   ![hello_world](examples/hello_world/screenshot.png)
 
-Either example's `cargo run -- --screenshot [path]` renders one frame headlessly
-(`render_to` into an offscreen texture, then `read_rgba`) to a PNG instead of
-opening a window — that's how the images above were made.
+Both are built on `windowed-shad-env`, so each `main.rs` is just its `Game`/`setup`/
+`update` logic — no winit. Either example's `cargo run -- --screenshot [path]`
+renders one frame headlessly to a PNG instead of opening a window — that's how the
+images above were made.
 
 Run with `cargo run` from the example's directory.
 
