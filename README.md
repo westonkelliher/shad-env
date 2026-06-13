@@ -43,4 +43,3 @@ See `specs/shad_env_api.rs` for the prototypes + design rules.
 ## Status
 
 Early. Built on [`wgpu`](https://wgpu.rs) (Rust → native + WebGPU).
-See `responses/` for design notes and the current POC.

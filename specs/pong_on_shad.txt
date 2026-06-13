@@ -1,0 +1,16 @@
+
+
+ball:
+- the shad area for the ball will be small and just follow the ball's x,y
+
+paddles:
+- the shad area will be fixed and we'll pass in paddle height through a bind group
+
+
+mechanics:
+- counters on top left and top right
+- right paddle moves pseudo-randomly, slightly prefering to be close to ball height
+- left paddle is controlled by up and down arrows
+- top left and top right show score
+- when ball scores it returns to middle without changeing velocity
+- normal pong mechanics in terms of hits
