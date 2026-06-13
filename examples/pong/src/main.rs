@@ -44,9 +44,9 @@ fn rescale(v: [f32; 2], speed: f32) -> [f32; 2] {
 // Each shader, pinned to the hash of its file (version-control guard: if the
 // .wgsl changes without updating the hash, register_shader errors out).
 const SHADERS: [(&str, &str, &str); 3] = [
-    ("ball", concat!(env!("CARGO_MANIFEST_DIR"), "/src/ball.wgsl"), "0b9563db49126f61"),
-    ("paddle", concat!(env!("CARGO_MANIFEST_DIR"), "/src/paddle.wgsl"), "2f04b89afe832f79"),
-    ("digit", concat!(env!("CARGO_MANIFEST_DIR"), "/src/digit.wgsl"), "ad3b5621da30e70f"),
+    ("ball", concat!(env!("CARGO_MANIFEST_DIR"), "/src/ball.wgsl"), "1c619c62da6cb838"),
+    ("paddle", concat!(env!("CARGO_MANIFEST_DIR"), "/src/paddle.wgsl"), "68bea9a4fe546208"),
+    ("digit", concat!(env!("CARGO_MANIFEST_DIR"), "/src/digit.wgsl"), "056b336b5bdb3180"),
 ];
 
 /// A tiny xorshift32 so the right paddle wanders without a `rand` dependency.
@@ -194,7 +194,7 @@ async fn run() {
     env.configure(window.clone()).unwrap();
 
     for (handle, path, hash) in SHADERS {
-        env.register_shader(handle, path, hash).unwrap();
+        env.register_shader(handle, path, hash, true).unwrap();
     }
 
     // ball follows the ball; paddles are fixed full-height strips; scores sit

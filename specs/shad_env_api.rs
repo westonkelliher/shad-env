@@ -58,14 +58,30 @@ impl ShadEnv {
     /// Reconfigure the surface to a new size (call on winit `Resized`).
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), ShadError> { todo!() }
 
-    /// Read `path`, validate its content hash against `hash` (err on
-    /// mismatch), compile, store under `shader_handle`.
-    pub fn register_shader(&mut self, shader_handle: &str, path: &str, hash: &str)
+    /// Read `path`, optionally validate its content hash against `hash` (err on
+    /// mismatch when `validate` is true), compile, store under `shader_handle`.
+    pub fn register_shader(&mut self, shader_handle: &str, path: &str, hash: &str, validate: bool)
+        -> Result<(), ShadError> { todo!() }
+
+    /// Store a 2D data source (raw RGBA8, `w*h*4` bytes). Meaning is the
+    /// shader's; bind to a shad with `set_texture`.
+    pub fn register_texture(&mut self, handle: &str, rgba: &[u8], width: u32, height: u32)
+        -> Result<(), ShadError> { todo!() }
+
+    /// Store an array data source (raw bytes, read in-shader as `array<u32>`).
+    /// Bind to a shad with `set_buffer`.
+    pub fn register_buffer(&mut self, handle: &str, data: &[u8])
         -> Result<(), ShadError> { todo!() }
 
     /// Bind `shader_handle` to the corner rect (x1,y1,x2,y2); z defaults to 0.
     pub fn add_shad(&mut self, shad_handle: &str, shader_handle: &str,
         corners: [f32; 4], z: Option<f32>) -> Result<(), ShadError> { todo!() }
+
+    /// Bind a registered texture / buffer to a shad (`tex`+`samp` / `buf`).
+    pub fn set_texture(&mut self, shad_handle: &str, tex_handle: &str)
+        -> Result<(), ShadError> { todo!() }
+    pub fn set_buffer(&mut self, shad_handle: &str, buf_handle: &str)
+        -> Result<(), ShadError> { todo!() }
 
     /// Move/relayer an existing shad (keeps current z if `z` is None).
     pub fn move_shad(&mut self, shad_handle: &str, corners: [f32; 4], z: Option<f32>)

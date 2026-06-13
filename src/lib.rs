@@ -54,6 +54,8 @@ pub enum ShadError {
     UnknownShader(String),
     UnknownShad(String),
     UnknownUniform(String),
+    UnknownTexture(String),
+    UnknownBuffer(String),
     HashMismatch { expected: String, got: String },
     Io(std::io::Error),
     Surface(wgpu::SurfaceError),
@@ -65,6 +67,14 @@ struct Shader {
     module: wgpu::ShaderModule,
 }
 
+/// A registered 2D data source (`register_texture`). What its pixels MEAN is up
+/// to the shader sampling it.
+struct Texture {
+    #[allow(dead_code)]
+    texture: wgpu::Texture, // kept alive; `view` is what the bind group references
+    view: wgpu::TextureView,
+}
+
 /// One placed shader-rect: its pipeline, uniforms, and draw ordering.
 struct Shad {
     rect: [f32; 4], // x, y, w, h
@@ -73,7 +83,9 @@ struct Shad {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     uniform_buf: wgpu::Buffer,
-    uniforms: Uniforms, // CPU-side copy, uploaded each render
+    uniforms: Uniforms,        // CPU-side copy, uploaded each render
+    tex_handle: Option<String>, // bound via set_texture; None -> default white
+    buf_handle: Option<String>, // bound via set_buffer; None -> default 1-elem
 }
 
 pub struct ShadEnv {
@@ -84,12 +96,20 @@ pub struct ShadEnv {
     bgl: wgpu::BindGroupLayout,
     pipeline_layout: wgpu::PipelineLayout,
 
+    // defaults bound when a shad sets no texture/buffer, so the shared bind
+    // group layout is always satisfiable (keeps pong & co. unchanged).
+    default_tex: wgpu::TextureView,
+    default_sampler: wgpu::Sampler,
+    default_buf: wgpu::Buffer,
+
     // populated by `configure`; None until then
     window: Option<Arc<Window>>,
     surface: Option<wgpu::Surface<'static>>,
     config: Option<wgpu::SurfaceConfiguration>,
 
     shaders: HashMap<String, Shader>,
+    textures: HashMap<String, Texture>,
+    buffers: HashMap<String, wgpu::Buffer>,
     shads: HashMap<String, Shad>,
     next_order: u64,
     start: Instant,
@@ -113,24 +133,89 @@ impl ShadEnv {
             .await
             .expect("failed to create device");
 
-        // One layout shared by every shad: a single uniform buffer at binding 0.
+        // One layout shared by every shad: uniform buffer (0), plus a generic
+        // texture (1) + sampler (2) + storage buffer (3) that shaders may ignore.
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("shad uniforms"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            label: Some("shad bindings"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shad pipeline layout"),
             bind_group_layouts: &[&bgl],
             push_constant_ranges: &[],
+        });
+
+        // Default bindings for shads that set no texture/buffer: a 1x1 white
+        // pixel, a nearest sampler, and a 1-element zero buffer.
+        let default_tex_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("default white"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &default_tex_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[255u8, 255, 255, 255],
+            wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        let default_tex = default_tex_tex.create_view(&Default::default());
+        let default_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("default sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let default_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("default storage"),
+            contents: bytemuck::cast_slice(&[0u32]),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
         ShadEnv {
@@ -140,10 +225,15 @@ impl ShadEnv {
             queue,
             bgl,
             pipeline_layout,
+            default_tex,
+            default_sampler,
+            default_buf,
             window: None,
             surface: None,
             config: None,
             shaders: HashMap::new(),
+            textures: HashMap::new(),
+            buffers: HashMap::new(),
             shads: HashMap::new(),
             next_order: 0,
             start: Instant::now(),
@@ -187,22 +277,26 @@ impl ShadEnv {
         Ok(())
     }
 
-    /// COMMAND: read `path`, validate its content hash against `hash` (err on
-    /// mismatch), compile (prelude + fragment src), store under `shader_handle`.
-    /// `hash` is the FNV-1a-64 hex digest of the file bytes (see `content_hash`).
+    /// COMMAND: read `path`, optionally validate its content hash against `hash`
+    /// (err on mismatch when `validate` is true), compile (prelude + fragment
+    /// src), store under `shader_handle`. `hash` is the FNV-1a-64 hex digest of
+    /// the file bytes (see `content_hash`).
     pub fn register_shader(
         &mut self,
         shader_handle: &str,
         path: &str,
         hash: &str,
+        validate: bool,
     ) -> Result<(), ShadError> {
         let src = std::fs::read_to_string(path).map_err(ShadError::Io)?;
-        let got = content_hash(src.as_bytes());
-        if !got.eq_ignore_ascii_case(hash) {
-            return Err(ShadError::HashMismatch {
-                expected: hash.to_string(),
-                got,
-            });
+        if validate {
+            let got = content_hash(src.as_bytes());
+            if !got.eq_ignore_ascii_case(hash) {
+                return Err(ShadError::HashMismatch {
+                    expected: hash.to_string(),
+                    got,
+                });
+            }
         }
         let module = self
             .device
@@ -242,14 +336,16 @@ impl ShadEnv {
                 contents: bytemuck::bytes_of(&uniforms),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(shad_handle),
-            layout: &self.bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buf.as_entire_binding(),
-            }],
-        });
+        // starts on the defaults; set_texture/set_buffer rebuild it later
+        let bind_group = make_bind_group(
+            &self.device,
+            &self.bgl,
+            &uniform_buf,
+            &self.default_tex,
+            &self.default_sampler,
+            &self.default_buf,
+            shad_handle,
+        );
         let pipeline = self
             .device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -285,10 +381,122 @@ impl ShadEnv {
                 bind_group,
                 uniform_buf,
                 uniforms,
+                tex_handle: None,
+                buf_handle: None,
             },
         );
         self.next_order += 1;
         Ok(())
+    }
+
+    /// COMMAND: register a 2D data source under `handle` from raw RGBA8 bytes
+    /// (`width*height*4` long, row-major). Raw bytes by design -- the lib never
+    /// assumes an image codec, and the same path serves non-image data (LUTs,
+    /// packed glyph curves). Bind it to a shad with `set_texture`.
+    pub fn register_texture(
+        &mut self,
+        handle: &str,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<(), ShadError> {
+        let size = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(handle),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * width),
+                rows_per_image: Some(height),
+            },
+            size,
+        );
+        let view = texture.create_view(&Default::default());
+        self.textures.insert(handle.to_string(), Texture { texture, view });
+        Ok(())
+    }
+
+    /// COMMAND: register an array data source under `handle` from raw bytes
+    /// (read in-shader as `buf: array<u32>`). Bind it with `set_buffer`. Meaning
+    /// is the shader's: a string of codepoints, curve data, a tilemap, etc.
+    pub fn register_buffer(&mut self, handle: &str, data: &[u8]) -> Result<(), ShadError> {
+        let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(handle),
+            contents: data,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        self.buffers.insert(handle.to_string(), buffer);
+        Ok(())
+    }
+
+    /// COMMAND: bind registered texture `tex_handle` to `shad_handle` (the shad's
+    /// `tex`/`samp`). Rebuilds the shad's bind group.
+    pub fn set_texture(&mut self, shad_handle: &str, tex_handle: &str) -> Result<(), ShadError> {
+        if !self.textures.contains_key(tex_handle) {
+            return Err(ShadError::UnknownTexture(tex_handle.to_string()));
+        }
+        self.shads
+            .get_mut(shad_handle)
+            .ok_or_else(|| ShadError::UnknownShad(shad_handle.to_string()))?
+            .tex_handle = Some(tex_handle.to_string());
+        self.rebuild_bind_group(shad_handle);
+        Ok(())
+    }
+
+    /// COMMAND: bind registered buffer `buf_handle` to `shad_handle` (the shad's
+    /// `buf`). Rebuilds the shad's bind group.
+    pub fn set_buffer(&mut self, shad_handle: &str, buf_handle: &str) -> Result<(), ShadError> {
+        if !self.buffers.contains_key(buf_handle) {
+            return Err(ShadError::UnknownBuffer(buf_handle.to_string()));
+        }
+        self.shads
+            .get_mut(shad_handle)
+            .ok_or_else(|| ShadError::UnknownShad(shad_handle.to_string()))?
+            .buf_handle = Some(buf_handle.to_string());
+        self.rebuild_bind_group(shad_handle);
+        Ok(())
+    }
+
+    /// Rebuild a shad's bind group from its current texture/buffer handles,
+    /// falling back to the defaults. Cheap; called only on set_texture/set_buffer.
+    fn rebuild_bind_group(&mut self, shad_handle: &str) {
+        let Some(shad) = self.shads.get(shad_handle) else { return };
+        let tex_view = shad
+            .tex_handle
+            .as_ref()
+            .and_then(|h| self.textures.get(h))
+            .map(|t| &t.view)
+            .unwrap_or(&self.default_tex);
+        let buf = shad
+            .buf_handle
+            .as_ref()
+            .and_then(|h| self.buffers.get(h))
+            .unwrap_or(&self.default_buf);
+        let bind_group = make_bind_group(
+            &self.device,
+            &self.bgl,
+            &shad.uniform_buf,
+            tex_view,
+            &self.default_sampler,
+            buf,
+            shad_handle,
+        );
+        self.shads.get_mut(shad_handle).unwrap().bind_group = bind_group;
     }
 
     /// COMMAND: move/relayer an existing shad. Keeps the current z if `z` is None.
@@ -425,6 +633,35 @@ impl ShadEnv {
             vecs: shad.uniforms.vecs,
         })
     }
+}
+
+/// Build a shad's bind group: uniform buffer (0), texture (1), sampler (2),
+/// storage buffer (3). One creation path for `add_shad` and `rebuild_bind_group`.
+fn make_bind_group(
+    device: &wgpu::Device,
+    bgl: &wgpu::BindGroupLayout,
+    uniform_buf: &wgpu::Buffer,
+    tex_view: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+    buf: &wgpu::Buffer,
+    label: &str,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout: bgl,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: uniform_buf.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(tex_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry { binding: 3, resource: buf.as_entire_binding() },
+        ],
+    })
 }
 
 /// Corners (x1,y1,x2,y2) -> rect (x,y,w,h), order-independent.

@@ -1,0 +1,11 @@
+[package]
+name = "text"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+shad-env = { path = "../.." }
+winit = "0.29"
+pollster = "0.3"
+bytemuck = "1"
+font8x8 = "0.3"

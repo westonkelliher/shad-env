@@ -19,6 +19,13 @@ struct U {
 };
 @group(0) @binding(0) var<uniform> u: U;
 
+// Generic data sources -- their MEANING is the shader's business: `tex` may be a
+// font atlas, an LUT, a heightmap; `buf` may be a string, curve data, a tilemap.
+// Shads that set neither get a 1x1 white texture and a 1-element buffer.
+@group(0) @binding(1) var tex: texture_2d<f32>;
+@group(0) @binding(2) var samp: sampler;
+@group(0) @binding(3) var<storage, read> buf: array<u32>;
+
 struct VOut {
   @builtin(position) clip: vec4<f32>,
   @location(0) uv: vec2<f32>,
