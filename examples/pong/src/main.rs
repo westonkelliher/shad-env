@@ -191,7 +191,7 @@ fn main() {
 /// Register every shader and place the ball / paddle / score shads.
 fn setup(env: &mut ShadEnv) {
     for (handle, path, hash) in SHADERS {
-        env.register_shader(handle, path, hash, true).unwrap();
+        env.register_shader(handle, path, hash, false).unwrap();
     }
 
     // ball follows the ball; paddles are fixed full-height strips; scores sit
