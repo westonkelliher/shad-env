@@ -44,9 +44,9 @@ fn rescale(v: [f32; 2], speed: f32) -> [f32; 2] {
 // Each shader, pinned to the hash of its file (version-control guard: if the
 // .wgsl changes without updating the hash, register_shader errors out).
 const SHADERS: [(&str, &str, &str); 3] = [
-    ("ball", concat!(env!("CARGO_MANIFEST_DIR"), "/src/ball.wgsl"), "bd6c2c9743b92532"),
-    ("paddle", concat!(env!("CARGO_MANIFEST_DIR"), "/src/paddle.wgsl"), "dc63ade1c1d7f8c2"),
-    ("digit", concat!(env!("CARGO_MANIFEST_DIR"), "/src/digit.wgsl"), "aaf951f760c4d2d6"),
+    ("ball", concat!(env!("CARGO_MANIFEST_DIR"), "/src/ball.wgsl"), "0b9563db49126f61"),
+    ("paddle", concat!(env!("CARGO_MANIFEST_DIR"), "/src/paddle.wgsl"), "2f04b89afe832f79"),
+    ("digit", concat!(env!("CARGO_MANIFEST_DIR"), "/src/digit.wgsl"), "ad3b5621da30e70f"),
 ];
 
 /// A tiny xorshift32 so the right paddle wanders without a `rand` dependency.

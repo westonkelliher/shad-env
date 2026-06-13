@@ -22,6 +22,12 @@ fn vseg(p: vec2<f32>, cx: f32, cy: f32, hl: f32, t: f32) -> f32 {
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
+  // debug: paint the outer 2px of the rect red
+  let px = in.uv * u.resolution;
+  if (px.x < 2.0 || px.y < 2.0 || px.x > u.resolution.x - 2.0 || px.y > u.resolution.y - 2.0) {
+    return vec4(1.0, 0.0, 0.0, 1.0);
+  }
+
   let p = in.uv;                 // 0..1
   let mask = seg_mask(i32(round(u.scalars.x)));
   let t = 0.07;                  // segment half-thickness

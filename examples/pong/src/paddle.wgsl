@@ -6,6 +6,12 @@
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
+  // debug: paint the outer 2px of the rect red
+  let px = in.uv * u.resolution;
+  if (px.x < 2.0 || px.y < 2.0 || px.x > u.resolution.x - 2.0 || px.y > u.resolution.y - 2.0) {
+    return vec4(1.0, 0.0, 0.0, 1.0);
+  }
+
   let center = u.scalars.x;
   let half = u.scalars.y;
   let d = abs(in.uv.y - center) - half;   // <0 inside the paddle bar
