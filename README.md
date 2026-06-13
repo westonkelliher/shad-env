@@ -2,7 +2,7 @@
 
 <p align="center">
   <img src="examples/pong/screenshot.png" width="32%" alt="pong example">
-  <img src="examples/hello_world/screenshot.png" width="64%" alt="hello_world example">
+  <img src="examples/hello_world/screenshot-thumb.png" width="64%" alt="hello_world example">
 </p>
 
 An interface for building graphical applications out of **shader-driven rectangles**.
@@ -57,10 +57,14 @@ See `specs/shad_env_api.rs` for the prototypes + design rules.
 
 - **`examples/pong/`** — a full game: a ball shad moved each frame, full-height
   paddle strips fed their position via uniforms, and 7-segment score digits.
+
+  ![pong](examples/pong/screenshot.png)
 - **`examples/hello_world/`** — one shad renders a whole line of text by reading an
   ASCII spritesheet PNG (`tex`, baked by `gen_atlas.py`) and the string's codepoints
   (`buf`), carving its rect into character cells in-shader. Shows off
   `register_texture`/`register_buffer`.
+
+  ![hello_world](examples/hello_world/screenshot.png)
 
 Either example's `cargo run -- --screenshot [path]` renders one frame headlessly
 (via `render_to_target`) to a PNG instead of opening a window — that's how the
