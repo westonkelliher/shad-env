@@ -13,15 +13,21 @@ font = ImageFont.truetype(FONT, 26)
 img = Image.new("RGBA", (COLS * CELL, ROWS * CELL), (0, 0, 0, 0))
 draw = ImageDraw.Draw(img)
 
+# Shared baseline: center the whole ascent+descent line box in the cell so all
+# glyphs rest on one baseline (descenders drop, dots/commas sit low) instead of
+# each glyph being individually centered by its own ink bbox.
+ascent, descent = font.getmetrics()
+baseline = (CELL - (ascent + descent)) / 2 + ascent
+
 for code in range(COLS * ROWS):
     ch = chr(code)
     if not ch.isprintable() or ch == " ":
         continue
     cx, cy = (code % COLS) * CELL, (code // COLS) * CELL
-    l, t, r, b = draw.textbbox((0, 0), ch, font=font)
+    l, _, r, _ = draw.textbbox((0, 0), ch, font=font)
     x = cx + (CELL - (r - l)) / 2 - l
-    y = cy + (CELL - (b - t)) / 2 - t
-    draw.text((x, y), ch, font=font, fill=(255, 255, 255, 255))
+    y = cy + baseline
+    draw.text((x, y), ch, font=font, fill=(255, 255, 255, 255), anchor="ls")
 
 img.save(OUT)
 print(f"wrote {OUT}  ({img.width}x{img.height}, {COLS}x{ROWS} cells of {CELL}px)")
