@@ -57,7 +57,10 @@ See `specs/shad_env_api.rs` for the prototypes + design rules.
 - **`examples/hello_world/`** — one shad renders a whole line of text by reading an
   ASCII spritesheet PNG (`tex`, baked by `gen_atlas.py`) and the string's codepoints
   (`buf`), carving its rect into character cells in-shader. Shows off
-  `register_texture`/`register_buffer`.
+  `register_texture`/`register_buffer`. `cargo run -- --screenshot [path]` renders
+  one frame headlessly (via `render_to_target`) to a PNG instead of opening a window:
+
+  ![hello_world](examples/hello_world/screenshot.png)
 
 Run with `cargo run` from the example's directory.
 

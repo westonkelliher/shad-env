@@ -51,6 +51,7 @@ pub enum ShadError {
     HashMismatch { expected: String, got: String },
     Io(std::io::Error),
     Surface(wgpu::SurfaceError),
+    MapFailed,
 }
 
 /// A compiled shader (shared prelude + the registered fragment source),
@@ -547,6 +548,101 @@ impl ShadEnv {
             Err(e) => return Err(ShadError::Surface(e)),
         };
 
+        let view = frame.texture.create_view(&Default::default());
+        let encoder = self.encode_scene(&view, cw, ch, time);
+        self.queue.submit([encoder.finish()]);
+        frame.present();
+        Ok(())
+    }
+
+    /// COMMAND: render the current scene into an offscreen `width` x `height`
+    /// target and read it back as tightly-packed RGBA8 (row-major). No surface
+    /// required -- for screenshots, tests, and headless/CI rendering. Goes
+    /// through the exact same shaders and draw path as `render`.
+    pub fn render_to_target(&mut self, width: u32, height: u32) -> Result<Vec<u8>, ShadError> {
+        let time = self.start.elapsed().as_secs_f32();
+        let target = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("offscreen target"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+        let mut encoder = self.encode_scene(&view, width as f32, height as f32, time);
+
+        // copy target -> a mappable buffer; bytes_per_row must be 256-aligned
+        let bpp = 4u32;
+        let unpadded = width * bpp;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded = unpadded.div_ceil(align) * align;
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: (padded * height) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: &target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &readback,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        self.queue.submit([encoder.finish()]);
+
+        // block until the GPU finishes and the buffer is mapped
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+        self.device.poll(wgpu::Maintain::Wait);
+        rx.recv()
+            .ok()
+            .and_then(|r| r.ok())
+            .ok_or(ShadError::MapFailed)?;
+
+        // drop row padding and swizzle Bgra8 -> Rgba8
+        let data = slice.get_mapped_range();
+        let mut out = vec![0u8; (width * height * bpp) as usize];
+        for row in 0..height as usize {
+            let src = row * padded as usize;
+            let dst = row * unpadded as usize;
+            for px in 0..width as usize {
+                let (s, d) = (src + px * 4, dst + px * 4);
+                out[d] = data[s + 2]; // R <- B
+                out[d + 1] = data[s + 1];
+                out[d + 2] = data[s]; // B <- R
+                out[d + 3] = data[s + 3];
+            }
+        }
+        drop(data);
+        readback.unmap();
+        Ok(out)
+    }
+
+    /// Refresh builtins, upload uniforms, and encode the painter-ordered draw of
+    /// every shad into `view` (a `cw` x `ch` target, window px). Shared by the
+    /// on-screen `render` and the offscreen `render_to_target`.
+    fn encode_scene(
+        &mut self,
+        view: &wgpu::TextureView,
+        cw: f32,
+        ch: f32,
+        time: f32,
+    ) -> wgpu::CommandEncoder {
         // refresh builtins and upload each shad's whole uniform block
         for shad in self.shads.values_mut() {
             shad.uniforms.rect = shad.rect;
@@ -556,7 +652,6 @@ impl ShadEnv {
                 .write_buffer(&shad.uniform_buf, 0, bytemuck::bytes_of(&shad.uniforms));
         }
 
-        let view = frame.texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
 
         // painter's order: z ascending, then insertion order
@@ -571,7 +666,7 @@ impl ShadEnv {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -607,9 +702,7 @@ impl ShadEnv {
             }
         }
 
-        self.queue.submit([encoder.finish()]);
-        frame.present();
-        Ok(())
+        encoder
     }
 }
 

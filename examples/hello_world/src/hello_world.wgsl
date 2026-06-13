@@ -12,8 +12,14 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
   if (n == 0u) { return vec4(0.0); }      // uniform branch: safe for sampling
 
   let col = min(u32(floor(in.uv.x * f32(n))), n - 1u);
-  let cell = vec2(fract(in.uv.x * f32(n)), in.uv.y); // 0..1 within the cell
+  var cell = vec2(fract(in.uv.x * f32(n)), in.uv.y); // 0..1 within the cell
   let code = buf[col];
+
+  // Kern: glyphs are baked centered in square cells with side padding, so the
+  // text reads loose. Zoom horizontally into the cell (<1 crops side padding,
+  // pulling glyphs closer) to tighten the spacing a bit.
+  let KERN = 0.82;
+  cell.x = 0.5 + (cell.x - 0.5) * KERN;
 
   // atlas cell for this codepoint (16 x 8 grid)
   let ac = vec2(f32(code % 16u), f32(code / 16u));

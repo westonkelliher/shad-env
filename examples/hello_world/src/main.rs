@@ -33,22 +33,19 @@ fn load_atlas() -> (Vec<u8>, u32, u32) {
 }
 
 fn main() {
-    pollster::block_on(run());
+    // `cargo run -- --screenshot [path]` renders one offscreen frame to a PNG
+    // (no window); otherwise open a live window. Same scene, same shaders.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--screenshot") {
+        let path = args.get(2).map_or("hello_world.png", String::as_str);
+        pollster::block_on(screenshot(path));
+    } else {
+        pollster::block_on(run());
+    }
 }
 
-async fn run() {
-    let event_loop = EventLoop::new().unwrap();
-    let window = Arc::new(
-        WindowBuilder::new()
-            .with_title("shad-env: hello_world")
-            .with_inner_size(PhysicalSize::new(W as u32, H as u32))
-            .build(&event_loop)
-            .unwrap(),
-    );
-
-    let mut env = ShadEnv::new().await;
-    env.configure(window.clone()).unwrap();
-
+/// Register the shader + atlas + message and place the one centered shad.
+fn setup(env: &mut ShadEnv) {
     // no pinned hash for this demo -> validate = false
     env.register_shader(
         "hello_world",
@@ -72,6 +69,33 @@ async fn run() {
     env.set_texture("label", "ascii").unwrap();
     env.set_buffer("label", "msg").unwrap();
     env.set_uniform_value("label", "s0", Scalar(codes.len() as f32)).unwrap();
+}
+
+/// Headless: render one frame offscreen and write it to `path` as a PNG.
+async fn screenshot(path: &str) {
+    let mut env = ShadEnv::new().await;
+    setup(&mut env);
+    let rgba = env.render_to_target(W as u32, H as u32).unwrap();
+    image::RgbaImage::from_raw(W as u32, H as u32, rgba)
+        .expect("buffer size matches dimensions")
+        .save(path)
+        .unwrap();
+    println!("wrote {path}");
+}
+
+async fn run() {
+    let event_loop = EventLoop::new().unwrap();
+    let window = Arc::new(
+        WindowBuilder::new()
+            .with_title("shad-env: hello_world")
+            .with_inner_size(PhysicalSize::new(W as u32, H as u32))
+            .build(&event_loop)
+            .unwrap(),
+    );
+
+    let mut env = ShadEnv::new().await;
+    env.configure(window.clone()).unwrap();
+    setup(&mut env);
 
     event_loop
         .run(move |event, elwt| {
