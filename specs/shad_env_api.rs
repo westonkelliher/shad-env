@@ -26,14 +26,6 @@ pub enum UniformValue {
     Vec4([f32; 4]),
 }
 
-/// Read-only snapshot returned by the `get_shad_data` query.
-pub struct ShadData {
-    pub rect: [f32; 4], // x, y, w, h (window px)
-    pub z: f32,
-    pub scalars: [f32; 4],
-    pub vecs: [[f32; 4]; 4],
-}
-
 pub enum ShadError {
     NoSurface,
     UnknownShader(String),
@@ -93,7 +85,4 @@ impl ShadEnv {
 
     /// Draw every shad (z asc, then insertion order) and present.
     pub fn render(&mut self) -> Result<(), ShadError> { todo!() }
-
-    // ---- query (returns a value, mutates nothing) --------------------------
-    pub fn get_shad_data(&self, shad_handle: &str) -> Result<ShadData, ShadError> { todo!() }
 }

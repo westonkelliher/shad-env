@@ -40,14 +40,6 @@ pub enum UniformValue {
     Vec4([f32; 4]), // -> "v0".."v3"
 }
 
-/// Read-only snapshot returned by the `get_shad_data` query.
-pub struct ShadData {
-    pub rect: [f32; 4],
-    pub z: f32,
-    pub scalars: [f32; 4],
-    pub vecs: [[f32; 4]; 4],
-}
-
 #[derive(Debug)]
 pub enum ShadError {
     NoSurface,
@@ -618,20 +610,6 @@ impl ShadEnv {
         self.queue.submit([encoder.finish()]);
         frame.present();
         Ok(())
-    }
-
-    /// QUERY: snapshot of a shad's rect/z/user-uniforms. Mutates nothing.
-    pub fn get_shad_data(&self, shad_handle: &str) -> Result<ShadData, ShadError> {
-        let shad = self
-            .shads
-            .get(shad_handle)
-            .ok_or_else(|| ShadError::UnknownShad(shad_handle.to_string()))?;
-        Ok(ShadData {
-            rect: shad.rect,
-            z: shad.z,
-            scalars: shad.uniforms.scalars,
-            vecs: shad.uniforms.vecs,
-        })
     }
 }
 
