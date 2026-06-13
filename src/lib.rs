@@ -1,13 +1,22 @@
-// shad-env: the wgpu side of a shader-driven-rectangle UI. Owns
-// instance/adapter/device/queue and (after `configure`) the surface. The
-// caller's winit module owns the window + event loop and drives this via
-// `configure`/`resize`/`render`. See specs/shad_env_api.rs for the design
-// rules (command/query separation, explicit handles, single surface format).
+// shad-env: the wgpu side of a shader-driven-rectangle UI. Owns the GPU state
+// (instance/adapter/device/queue), the compiled shads, and nothing about where
+// pixels go. The sole renderer is `render_to(&view)`: the caller owns the
+// render target -- a winit surface frame, an offscreen texture, someone else's
+// pass -- and hands shad-env a view to draw into. Surface creation, the
+// swapchain loop, present, and readback all live in the caller (typically a UI
+// or game-engine layer built on top of this), using the exposed
+// `instance()`/`adapter()`/`device()`/`queue()` handles. See
+// specs/shad_env_api.rs for the design rules (command/query separation,
+// explicit handles, single render-target format).
 
 use std::collections::HashMap;
 use std::time::Instant;
 
 use wgpu::util::DeviceExt;
+
+// Re-exported so callers build their surface/textures against the exact wgpu
+// version shad-env links (mismatched wgpu versions don't interoperate).
+pub use wgpu;
 
 const SHARED: &str = include_str!("shared.wgsl");
 
@@ -19,7 +28,7 @@ const SHARED: &str = include_str!("shared.wgsl");
 pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
 
 /// The standard bind-group-0 uniform every shad shares. Builtins are written by
-/// `render` each frame; the generic `scalars`/`vecs` slots are what
+/// `render_to` each frame; the generic `scalars`/`vecs` slots are what
 /// `set_uniform_value` targets by name. Layout must match `U` in shared.wgsl.
 #[repr(C)]
 #[derive(Copy, Clone, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -41,7 +50,6 @@ pub enum UniformValue {
 
 #[derive(Debug)]
 pub enum ShadError {
-    NoSurface,
     UnknownShader(String),
     UnknownShad(String),
     UnknownUniform(String),
@@ -49,8 +57,6 @@ pub enum ShadError {
     UnknownBuffer(String),
     HashMismatch { expected: String, got: String },
     Io(std::io::Error),
-    Surface(wgpu::SurfaceError),
-    MapFailed,
 }
 
 /// A compiled shader (shared prelude + the registered fragment source),
@@ -94,10 +100,6 @@ pub struct ShadEnv {
     default_sampler: wgpu::Sampler,
     default_buf: wgpu::Buffer,
 
-    // populated by `configure`; None until then
-    surface: Option<wgpu::Surface<'static>>,
-    config: Option<wgpu::SurfaceConfiguration>,
-
     shaders: HashMap<String, Shader>,
     textures: HashMap<String, Texture>,
     buffers: HashMap<String, wgpu::Buffer>,
@@ -107,6 +109,11 @@ pub struct ShadEnv {
 }
 
 impl ShadEnv {
+    /// The render-target format every pipeline is baked against; allocate
+    /// caller-owned targets (surface config, offscreen textures) with it.
+    /// Mirror of the crate-level `FORMAT`.
+    pub const FORMAT: wgpu::TextureFormat = FORMAT;
+
     /// QUERY: build the device-level wgpu state and return it. No surface, no
     /// configuration -- nothing external is mutated.
     pub async fn new() -> ShadEnv {
@@ -219,8 +226,6 @@ impl ShadEnv {
             default_tex,
             default_sampler,
             default_buf,
-            surface: None,
-            config: None,
             shaders: HashMap::new(),
             textures: HashMap::new(),
             buffers: HashMap::new(),
@@ -230,48 +235,22 @@ impl ShadEnv {
         }
     }
 
-    /// COMMAND: create the surface from any window-like `target` and configure
-    /// it at `width` x `height`. The one place the surface is created. The bound
-    /// is wgpu's own (anything with raw window/display handles) -- winit's
-    /// `Arc<Window>` satisfies it, but so do SDL, GLFW, or a raw handle, so the
-    /// lib is compatible with winit without depending on it. The caller passes
-    /// the size explicitly (e.g. from `window.inner_size()`).
-    pub fn configure(
-        &mut self,
-        target: impl Into<wgpu::SurfaceTarget<'static>>,
-        width: u32,
-        height: u32,
-    ) -> Result<(), ShadError> {
-        let surface = self
-            .instance
-            .create_surface(target)
-            .map_err(|_| ShadError::NoSurface)?;
-        let caps = surface.get_capabilities(&self.adapter);
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: FORMAT,
-            width: width.max(1),
-            height: height.max(1),
-            present_mode: wgpu::PresentMode::Fifo, // always supported
-            alpha_mode: caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-        surface.configure(&self.device, &config);
-
-        self.surface = Some(surface);
-        self.config = Some(config);
-        Ok(())
+    /// QUERY: the wgpu handles shad-env owns, lent to the caller so it can build
+    /// its own render target. `instance`/`adapter` to create + configure a
+    /// surface (use `ShadEnv::FORMAT` as its format); `device`/`queue` to
+    /// allocate offscreen textures or read pixels back. shad-env never touches a
+    /// surface itself.
+    pub fn instance(&self) -> &wgpu::Instance {
+        &self.instance
     }
-
-    /// COMMAND: reconfigure the surface to a new size (winit `Resized`).
-    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), ShadError> {
-        let surface = self.surface.as_ref().ok_or(ShadError::NoSurface)?;
-        let config = self.config.as_mut().ok_or(ShadError::NoSurface)?;
-        config.width = width.max(1);
-        config.height = height.max(1);
-        surface.configure(&self.device, config);
-        Ok(())
+    pub fn adapter(&self) -> &wgpu::Adapter {
+        &self.adapter
+    }
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
     }
 
     /// COMMAND: read `path`, optionally validate its content hash against `hash`
@@ -534,123 +513,21 @@ impl ShadEnv {
         Ok(())
     }
 
-    /// COMMAND: write per-frame builtins into every shad, draw all shads (z asc,
-    /// then insertion order) into the surface frame, and present.
-    pub fn render(&mut self) -> Result<(), ShadError> {
-        let surface = self.surface.as_ref().ok_or(ShadError::NoSurface)?;
-        let config = self.config.as_ref().ok_or(ShadError::NoSurface)?;
-        let (w, h) = (config.width, config.height);
-
-        let frame = match surface.get_current_texture() {
-            Ok(f) => f,
-            // transient loss: reconfigure and skip this frame
-            Err(wgpu::SurfaceError::Lost) | Err(wgpu::SurfaceError::Outdated) => {
-                surface.configure(&self.device, config);
-                return Ok(());
-            }
-            Err(e) => return Err(ShadError::Surface(e)),
-        };
-
-        let view = frame.texture.create_view(&Default::default());
-        self.render_to(&view, w, h);
-        frame.present();
-        Ok(())
-    }
-
-    /// COMMAND: draw the current scene into any caller-owned `view`, sized
-    /// `width` x `height` (window px). Encodes + submits the GPU work; does NOT
-    /// present or read back -- that epilogue is the caller's (present a surface,
-    /// read back an offscreen texture, sample it into another pass, ...). The
-    /// view's texture MUST be `ShadEnv::FORMAT`, since pipelines are baked
-    /// against it. This is the generic target boundary `render` and
-    /// `render_to_target` both rest on.
+    /// COMMAND: the one renderer. Write per-frame builtins into every shad, draw
+    /// them (z ascending, then insertion order) into the caller-owned `view`,
+    /// sized `width` x `height` (px), and submit. Does NOT present or read back
+    /// -- shad-env doesn't own the target; that epilogue is the caller's (present
+    /// a winit surface frame, read back an offscreen texture, sample it into
+    /// another pass, ...). The view's texture MUST be `ShadEnv::FORMAT`, since
+    /// pipelines are baked against it.
     pub fn render_to(&mut self, view: &wgpu::TextureView, width: u32, height: u32) {
         let time = self.start.elapsed().as_secs_f32();
         let encoder = self.encode_scene(view, width as f32, height as f32, time);
         self.queue.submit([encoder.finish()]);
     }
 
-    /// COMMAND: render the current scene into an offscreen `width` x `height`
-    /// target and read it back as tightly-packed RGBA8 (row-major). No surface
-    /// required -- for screenshots, tests, and headless/CI rendering. Goes
-    /// through the exact same shaders and draw path as `render`.
-    pub fn render_to_target(&mut self, width: u32, height: u32) -> Result<Vec<u8>, ShadError> {
-        let time = self.start.elapsed().as_secs_f32();
-        let target = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("offscreen target"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let view = target.create_view(&Default::default());
-        let mut encoder = self.encode_scene(&view, width as f32, height as f32, time);
-
-        // copy target -> a mappable buffer; bytes_per_row must be 256-aligned
-        let bpp = 4u32;
-        let unpadded = width * bpp;
-        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded = unpadded.div_ceil(align) * align;
-        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("readback"),
-            size: (padded * height) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        encoder.copy_texture_to_buffer(
-            wgpu::ImageCopyTexture {
-                texture: &target,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::ImageCopyBuffer {
-                buffer: &readback,
-                layout: wgpu::ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded),
-                    rows_per_image: Some(height),
-                },
-            },
-            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-        );
-        self.queue.submit([encoder.finish()]);
-
-        // block until the GPU finishes and the buffer is mapped
-        let slice = readback.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
-        self.device.poll(wgpu::Maintain::Wait);
-        rx.recv()
-            .ok()
-            .and_then(|r| r.ok())
-            .ok_or(ShadError::MapFailed)?;
-
-        // drop row padding and swizzle Bgra8 -> Rgba8
-        let data = slice.get_mapped_range();
-        let mut out = vec![0u8; (width * height * bpp) as usize];
-        for row in 0..height as usize {
-            let src = row * padded as usize;
-            let dst = row * unpadded as usize;
-            for px in 0..width as usize {
-                let (s, d) = (src + px * 4, dst + px * 4);
-                out[d] = data[s + 2]; // R <- B
-                out[d + 1] = data[s + 1];
-                out[d + 2] = data[s]; // B <- R
-                out[d + 3] = data[s + 3];
-            }
-        }
-        drop(data);
-        readback.unmap();
-        Ok(out)
-    }
-
     /// Refresh builtins, upload uniforms, and encode the painter-ordered draw of
-    /// every shad into `view` (a `cw` x `ch` target, window px). Shared by the
-    /// on-screen `render` and the offscreen `render_to_target`.
+    /// every shad into `view` (a `cw` x `ch` target, px). The body of `render_to`.
     fn encode_scene(
         &mut self,
         view: &wgpu::TextureView,
@@ -719,6 +596,74 @@ impl ShadEnv {
 
         encoder
     }
+}
+
+/// Read a `COPY_SRC` texture back to tightly-packed RGBA8 (row-major). A
+/// stateless GPU utility, not a renderer: the caller owns the `texture` (e.g. an
+/// offscreen target it allocated, rendered into with `render_to`, and now wants
+/// on the CPU for a screenshot or test). Blocks until the GPU is done. Assumes
+/// the texture is `ShadEnv::FORMAT` (Bgra8) and swizzles to RGBA on the way out.
+pub fn read_rgba(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    // copy texture -> a mappable buffer; bytes_per_row must be 256-aligned
+    let bpp = 4u32;
+    let unpadded = width * bpp;
+    let padded = unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size: (padded * height) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        wgpu::ImageCopyTexture {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::ImageCopyBuffer {
+            buffer: &readback,
+            layout: wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+    );
+    queue.submit([encoder.finish()]);
+
+    // block until the GPU finishes and the buffer is mapped
+    let slice = readback.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+    device.poll(wgpu::Maintain::Wait);
+    rx.recv().ok().and_then(|r| r.ok()).expect("readback map failed");
+
+    // drop row padding and swizzle Bgra8 -> Rgba8
+    let data = slice.get_mapped_range();
+    let mut out = vec![0u8; (width * height * bpp) as usize];
+    for row in 0..height as usize {
+        let src = row * padded as usize;
+        let dst = row * unpadded as usize;
+        for px in 0..width as usize {
+            let (s, d) = (src + px * 4, dst + px * 4);
+            out[d] = data[s + 2]; // R <- B
+            out[d + 1] = data[s + 1];
+            out[d + 2] = data[s]; // B <- R
+            out[d + 3] = data[s + 3];
+        }
+    }
+    drop(data);
+    readback.unmap();
+    out
 }
 
 /// Build a shad's bind group: uniform buffer (0), texture (1), sampler (2),

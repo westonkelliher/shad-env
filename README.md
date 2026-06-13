@@ -22,17 +22,19 @@ Interpreting the texture or buffer is the shader's business.
 
 ## Library (`src/lib.rs`)
 
-`ShadEnv` is the whole wgpu side — instance/adapter/device/queue and, after
-`configure`, the surface. The caller's winit module owns the window + event loop
-and drives it. Conventions: command/query separation (mutators return only
+`ShadEnv` is the whole wgpu side — instance/adapter/device/queue and the compiled
+shads. It owns **no** render target: the sole renderer, `render_to(&view, w, h)`,
+draws into a view the caller hands it (a winit surface frame, an offscreen
+texture, someone else's pass). Surface creation, the swapchain loop, present, and
+readback live in the caller, using the exposed `instance()`/`adapter()`/`device()`/
+`queue()` handles. Conventions: command/query separation (mutators return only
 `Result<(), _>`, queries return values), explicit caller-chosen handles (no
-internal ids), and one universal `Bgra8Unorm` surface format.
+internal ids), and one universal `Bgra8Unorm` target format (`ShadEnv::FORMAT`).
 
 | method | purpose |
 |---|---|
-| `new()` | build device-level wgpu state (no surface) |
-| `configure(window)` | create + configure the surface |
-| `resize(w, h)` | reconfigure on winit `Resized` |
+| `new()` | build device-level wgpu state (no target) |
+| `instance()`/`adapter()`/`device()`/`queue()` | borrow the wgpu handles to build your own target |
 | `register_shader(handle, path, hash, validate)` | optionally hash-validate, compile, store |
 | `register_texture(handle, rgba, w, h)` | store a 2D data source (raw RGBA8) |
 | `register_buffer(handle, bytes)` | store an array data source (raw bytes) |
@@ -41,7 +43,10 @@ internal ids), and one universal `Bgra8Unorm` surface format.
 | `set_uniform_value(handle, name, val)` | write a named user slot |
 | `set_texture(shad, tex)` | bind a texture to a shad (`tex`/`samp`) |
 | `set_buffer(shad, buf)` | bind a buffer to a shad (`buf`) |
-| `render()` | draw all shads (z, then order) + present |
+| `render_to(view, w, h)` | draw all shads (z, then order) into a caller-owned view |
+
+Plus the free fn `read_rgba(device, queue, texture, w, h)` — pull a `COPY_SRC`
+target back to CPU RGBA8 (screenshots, tests).
 
 **Shader inputs** (`src/shared.wgsl`): builtins `rect`/`resolution`/`mouse`/`time`;
 generic user slots `s0..s3` (scalars) and `v0..v3` (vec4s) via `set_uniform_value`;
@@ -67,8 +72,8 @@ See `specs/shad_env_api.rs` for the prototypes + design rules.
   ![hello_world](examples/hello_world/screenshot.png)
 
 Either example's `cargo run -- --screenshot [path]` renders one frame headlessly
-(via `render_to_target`) to a PNG instead of opening a window — that's how the
-images above were made.
+(`render_to` into an offscreen texture, then `read_rgba`) to a PNG instead of
+opening a window — that's how the images above were made.
 
 Run with `cargo run` from the example's directory.
 

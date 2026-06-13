@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use shad_env::{ShadEnv, UniformValue::Scalar};
+use shad_env::{wgpu, ShadEnv, UniformValue::Scalar};
 use winit::{
     dpi::PhysicalSize,
     event::{ElementState, Event, KeyEvent, WindowEvent},
@@ -212,8 +212,20 @@ async fn screenshot(path: &str) {
         game.update(1.0 / 60.0); // fixed dt -> reproducible composition
     }
     game.sync(&mut env);
-    let rgba = env.render_to_target(W as u32, H as u32).unwrap();
-    image::RgbaImage::from_raw(W as u32, H as u32, rgba)
+    let (w, h) = (W as u32, H as u32);
+    let target = env.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("screenshot"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: ShadEnv::FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    env.render_to(&target.create_view(&Default::default()), w, h);
+    let rgba = shad_env::read_rgba(env.device(), env.queue(), &target, w, h);
+    image::RgbaImage::from_raw(w, h, rgba)
         .expect("buffer size matches dimensions")
         .save(path)
         .unwrap();
@@ -231,9 +243,23 @@ async fn run() {
     );
 
     let mut env = ShadEnv::new().await;
-    let size = window.inner_size();
-    env.configure(window.clone(), size.width, size.height).unwrap();
     setup(&mut env);
+
+    // The app owns the surface + swapchain loop; shad-env only draws into the
+    // frame view we hand it. Build the surface from shad-env's wgpu handles.
+    let surface = env.instance().create_surface(window.clone()).unwrap();
+    let size = window.inner_size();
+    let mut config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format: ShadEnv::FORMAT,
+        width: size.width.max(1),
+        height: size.height.max(1),
+        present_mode: wgpu::PresentMode::Fifo,
+        alpha_mode: surface.get_capabilities(env.adapter()).alpha_modes[0],
+        view_formats: vec![],
+        desired_maximum_frame_latency: 2,
+    };
+    surface.configure(env.device(), &config);
 
     let mut game = Game::new();
     let mut last = Instant::now();
@@ -254,7 +280,9 @@ async fn run() {
                     }
                 }
                 WindowEvent::Resized(s) => {
-                    env.resize(s.width, s.height).unwrap();
+                    config.width = s.width.max(1);
+                    config.height = s.height.max(1);
+                    surface.configure(env.device(), &config);
                 }
                 WindowEvent::RedrawRequested => {
                     let now = Instant::now();
@@ -263,9 +291,20 @@ async fn run() {
 
                     game.update(dt);
                     game.sync(&mut env);
-                    if let Err(e) = env.render() {
-                        eprintln!("render error: {e:?}");
-                    }
+                    let frame = match surface.get_current_texture() {
+                        Ok(f) => f,
+                        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                            surface.configure(env.device(), &config);
+                            return;
+                        }
+                        Err(e) => {
+                            eprintln!("surface error: {e:?}");
+                            return;
+                        }
+                    };
+                    let view = frame.texture.create_view(&Default::default());
+                    env.render_to(&view, config.width, config.height);
+                    frame.present();
                     window.request_redraw();
                 }
                 _ => {}
