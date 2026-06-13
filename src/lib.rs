@@ -5,19 +5,18 @@
 // rules (command/query separation, explicit handles, single surface format).
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Instant;
 
 use wgpu::util::DeviceExt;
-use winit::window::Window;
 
 const SHARED: &str = include_str!("shared.wgsl");
 
 /// One universal swapchain format. `Bgra8Unorm` is presentable on every native
 /// backend and is WebGPU's guaranteed canvas format, and it's non-sRGB so
 /// shader output colors are used as-is. Pipelines are built against this
-/// constant, so they don't need the surface to exist yet.
-const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
+/// constant, so they don't need the surface to exist yet. Public so callers
+/// who hand their own target to `render_to` can allocate a matching texture.
+pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
 
 /// The standard bind-group-0 uniform every shad shares. Builtins are written by
 /// `render` each frame; the generic `scalars`/`vecs` slots are what
@@ -96,7 +95,6 @@ pub struct ShadEnv {
     default_buf: wgpu::Buffer,
 
     // populated by `configure`; None until then
-    window: Option<Arc<Window>>,
     surface: Option<wgpu::Surface<'static>>,
     config: Option<wgpu::SurfaceConfiguration>,
 
@@ -221,7 +219,6 @@ impl ShadEnv {
             default_tex,
             default_sampler,
             default_buf,
-            window: None,
             surface: None,
             config: None,
             shaders: HashMap::new(),
@@ -233,20 +230,28 @@ impl ShadEnv {
         }
     }
 
-    /// COMMAND: create the surface from `window` and configure it at the
-    /// window's current size. The one place the surface is created.
-    pub fn configure(&mut self, window: Arc<Window>) -> Result<(), ShadError> {
+    /// COMMAND: create the surface from any window-like `target` and configure
+    /// it at `width` x `height`. The one place the surface is created. The bound
+    /// is wgpu's own (anything with raw window/display handles) -- winit's
+    /// `Arc<Window>` satisfies it, but so do SDL, GLFW, or a raw handle, so the
+    /// lib is compatible with winit without depending on it. The caller passes
+    /// the size explicitly (e.g. from `window.inner_size()`).
+    pub fn configure(
+        &mut self,
+        target: impl Into<wgpu::SurfaceTarget<'static>>,
+        width: u32,
+        height: u32,
+    ) -> Result<(), ShadError> {
         let surface = self
             .instance
-            .create_surface(window.clone())
+            .create_surface(target)
             .map_err(|_| ShadError::NoSurface)?;
-        let size = window.inner_size();
         let caps = surface.get_capabilities(&self.adapter);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: FORMAT,
-            width: size.width.max(1),
-            height: size.height.max(1),
+            width: width.max(1),
+            height: height.max(1),
             present_mode: wgpu::PresentMode::Fifo, // always supported
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
@@ -254,7 +259,6 @@ impl ShadEnv {
         };
         surface.configure(&self.device, &config);
 
-        self.window = Some(window);
         self.surface = Some(surface);
         self.config = Some(config);
         Ok(())
@@ -533,10 +537,9 @@ impl ShadEnv {
     /// COMMAND: write per-frame builtins into every shad, draw all shads (z asc,
     /// then insertion order) into the surface frame, and present.
     pub fn render(&mut self) -> Result<(), ShadError> {
-        let time = self.start.elapsed().as_secs_f32();
         let surface = self.surface.as_ref().ok_or(ShadError::NoSurface)?;
         let config = self.config.as_ref().ok_or(ShadError::NoSurface)?;
-        let (cw, ch) = (config.width as f32, config.height as f32);
+        let (w, h) = (config.width, config.height);
 
         let frame = match surface.get_current_texture() {
             Ok(f) => f,
@@ -549,10 +552,22 @@ impl ShadEnv {
         };
 
         let view = frame.texture.create_view(&Default::default());
-        let encoder = self.encode_scene(&view, cw, ch, time);
-        self.queue.submit([encoder.finish()]);
+        self.render_to(&view, w, h);
         frame.present();
         Ok(())
+    }
+
+    /// COMMAND: draw the current scene into any caller-owned `view`, sized
+    /// `width` x `height` (window px). Encodes + submits the GPU work; does NOT
+    /// present or read back -- that epilogue is the caller's (present a surface,
+    /// read back an offscreen texture, sample it into another pass, ...). The
+    /// view's texture MUST be `ShadEnv::FORMAT`, since pipelines are baked
+    /// against it. This is the generic target boundary `render` and
+    /// `render_to_target` both rest on.
+    pub fn render_to(&mut self, view: &wgpu::TextureView, width: u32, height: u32) {
+        let time = self.start.elapsed().as_secs_f32();
+        let encoder = self.encode_scene(view, width as f32, height as f32, time);
+        self.queue.submit([encoder.finish()]);
     }
 
     /// COMMAND: render the current scene into an offscreen `width` x `height`

@@ -94,7 +94,8 @@ async fn run() {
     );
 
     let mut env = ShadEnv::new().await;
-    env.configure(window.clone()).unwrap();
+    let size = window.inner_size();
+    env.configure(window.clone(), size.width, size.height).unwrap();
     setup(&mut env);
 
     event_loop

@@ -9,5 +9,4 @@ path = "src/lib.rs"
 
 [dependencies]
 wgpu = "0.19"
-winit = "0.29"
 bytemuck = { version = "1", features = ["derive"] }
