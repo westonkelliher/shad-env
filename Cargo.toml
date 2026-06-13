@@ -1,0 +1,13 @@
+[package]
+name = "shad-env"
+version = "0.1.0"
+edition = "2021"
+autoexamples = false # examples/ holds standalone crates, not example targets
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+wgpu = "0.19"
+winit = "0.29"
+bytemuck = { version = "1", features = ["derive"] }
