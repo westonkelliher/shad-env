@@ -7,8 +7,7 @@
 // The atlas (`ascii_atlas.png`, a 16x8 grid of 32px glyph cells indexed by
 // codepoint) is baked by `gen_atlas.py`; here we just decode it with `image`.
 
-use shad_env::{ShadEnv, UniformValue::Scalar};
-use windowed_shad_env::App;
+use windowed_shad_env::{App, ShadEnv, UniformValue::Scalar};
 
 const MSG: &str = "Hello, World!";
 const W: f32 = 600.0;

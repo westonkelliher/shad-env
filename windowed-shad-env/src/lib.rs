@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
-use shad_env::{wgpu, ShadEnv};
+use shad_env::wgpu;
 use winit::{
     dpi::PhysicalSize,
     event::{ElementState, Event, KeyEvent, WindowEvent},
@@ -20,7 +20,10 @@ use winit::{
     window::WindowBuilder,
 };
 
-// Re-exported so apps name keys without depending on winit directly.
+// This crate is the single dependency an app needs: re-export shad-env's API
+// (so apps name `ShadEnv`/`UniformValue` through us, never depending on shad-env
+// directly) and winit's key types (so apps name keys without a winit dep).
+pub use shad_env::{self, ShadEnv, UniformValue};
 pub use winit::keyboard::{Key, NamedKey};
 
 /// Per-frame keyboard state: which keys are currently held. Esc is handled by

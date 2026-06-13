@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-shad-env = { path = "../.." }
 windowed-shad-env = { path = "../../windowed-shad-env" }
 bytemuck = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }

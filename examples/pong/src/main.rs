@@ -7,8 +7,7 @@
 //              in via set_uniform_value (s0 = center, s1 = half-height)
 //   - scores : 7-segment digit shads, the count pushed in via s0
 
-use shad_env::{ShadEnv, UniformValue::Scalar};
-use windowed_shad_env::{App, Key, NamedKey};
+use windowed_shad_env::{App, Key, NamedKey, ShadEnv, UniformValue::Scalar};
 
 const W: f32 = 800.0;
 const H: f32 = 500.0;

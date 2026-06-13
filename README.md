@@ -69,8 +69,14 @@ runs the event loop (resize/close/Esc), drives each frame (acquire → update �
 headless `--screenshot [path]` mode (one offscreen frame + `read_rgba` → PNG), with
 a `screenshot_warmup(steps, dt)` hook so a deterministic sim lands on a lively frame.
 
+It is the **single dependency** an app needs: it re-exports shad-env's API
+(`ShadEnv`, `UniformValue`, …) and winit's key types, so an app names neither crate
+directly.
+
 ```rust
-windowed_shad_env::App::new("title", 800, 500)
+use windowed_shad_env::{App, ShadEnv, UniformValue::Scalar, Key, NamedKey};
+
+App::new("title", 800, 500)
     .screenshot_warmup(220, 1.0 / 60.0)
     .run(setup, move |env, dt, input| { /* game logic + shad calls */ });
 ```
