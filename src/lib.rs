@@ -389,13 +389,18 @@ impl ShadEnv {
             });
             for shad in &order {
                 let [x, y, w, h] = shad.rect;
-                // clamp so the viewport never exceeds the framebuffer
-                let w = w.min(cw - x).max(0.0);
-                let h = h.min(ch - y).max(0.0);
-                if w == 0.0 || h == 0.0 {
+                // clamp to the framebuffer so the viewport stays valid: a
+                // partially off-screen shad is squished at the edge, a fully
+                // off-screen one is skipped. (A viewport whose origin is
+                // negative or that exceeds the target is a wgpu error.)
+                let x0 = x.max(0.0);
+                let y0 = y.max(0.0);
+                let vw = (x + w).min(cw) - x0;
+                let vh = (y + h).min(ch) - y0;
+                if vw <= 0.0 || vh <= 0.0 {
                     continue;
                 }
-                pass.set_viewport(x, y, w, h, 0.0, 1.0);
+                pass.set_viewport(x0, y0, vw, vh, 0.0, 1.0);
                 pass.set_pipeline(&shad.pipeline);
                 pass.set_bind_group(0, &shad.bind_group, &[]);
                 pass.draw(0..3, 0..1);
