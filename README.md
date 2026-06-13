@@ -1,8 +1,8 @@
 # shad-env
 
 <p align="center">
-  <img src="examples/pong/screenshot.png" width="49%" alt="pong example">
-  <img src="examples/hello_world/screenshot.png" width="49%" alt="hello_world example">
+  <img src="examples/pong/screenshot.png" width="32%" alt="pong example">
+  <img src="examples/hello_world/screenshot.png" width="64%" alt="hello_world example">
 </p>
 
 An interface for building graphical applications out of **shader-driven rectangles**.
